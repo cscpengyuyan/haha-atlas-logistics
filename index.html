@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#070b12">
+<meta name="description" content="HAHA ATLAS · 美国大件设备物流指挥台：地图调度、海运在途看板、路径比价、异常与结算。演示数据，非生产系统。">
+<title>HAHA ATLAS · 美国大件物流指挥台</title>
+<link rel="icon" href="./assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./assets/css/app.css">
+</head>
+<body>
+<!-- ── boot veil ─────────────────────────────────────────────────────── -->
+<div id="boot" class="boot" role="status" aria-live="polite">
+  <div class="boot-mark">
+    <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true"><path d="M24 3.5 42.5 13v22L24 44.5 5.5 35V13Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M24 3.5 42.5 13 24 22.5 5.5 13Z" fill="currentColor" opacity=".18"/><path d="M24 22.5v22M5.5 13v22L24 44.5" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".55"/></svg>
+  </div>
+  <div class="boot-txt"><b>HAHA ATLAS</b><span>正在装配路网与在途数据…</span></div>
+</div>
+
+<!-- ── shell ─────────────────────────────────────────────────────────── -->
+<div class="app" id="app" hidden>
+  <aside class="rail" id="rail" aria-label="主导航">
+    <div class="rail-brand">
+      <svg class="rail-logo" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 3.5 42.5 13v22L24 44.5 5.5 35V13Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M24 3.5 42.5 13 24 22.5 5.5 13Z" fill="currentColor" opacity=".22"/><path d="M24 22.5v22M5.5 13v22L24 44.5" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".5"/></svg>
+      <div class="rail-brandtxt"><b>HAHA<span>ATLAS</span></b><i>美国大件物流指挥台</i></div>
+    </div>
+    <nav class="rail-nav" id="railNav"></nav>
+    <div class="rail-foot">
+      <div class="rail-note">
+        <span class="dot dot--amber"></span>
+        <div><b>演示环境</b><i>全部数据为模拟样本，不可作为业务凭证。</i></div>
+      </div>
+      <div class="rail-build" id="railBuild">ATLAS 1.0 · 依据 V12 方案</div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="btnRail" aria-label="打开导航">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+      </button>
+      <div class="topbar-title">
+        <h1 id="viewTitle">指挥总览</h1>
+        <p id="viewSub">今日态势与网络负载</p>
+      </div>
+      <div class="topbar-actions">
+        <div class="clock" title="推演时钟：所有时效、免期与窗口按此日期计算">
+          <button class="icon-btn" id="btnPlay" aria-label="播放推演" aria-pressed="false">
+            <svg viewBox="0 0 24 24" width="15" height="15" class="ico-play"><path d="M8 5.5v13l11-6.5Z" fill="currentColor"/></svg>
+            <svg viewBox="0 0 24 24" width="15" height="15" class="ico-pause" hidden><path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/></svg>
+          </button>
+          <div class="clock-face">
+            <span id="clockDate">2026-11-01</span>
+            <small id="clockDay">周日 · 达拉斯 10:00</small>
+          </div>
+          <button class="icon-btn" id="btnAdvance" aria-label="推进一天">
+            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M5 5.5v13l9-6.5Z" fill="currentColor"/><path d="M17 5v14" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+        </div>
+        <button class="ghost-btn" id="btnReset" title="恢复初始演示数据">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 12a8 8 0 1 0 2.6-5.9M4 4v4.5h4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          <span>重置</span>
+        </button>
+        <button class="icon-btn" id="btnTheme" aria-label="切换明暗主题">
+          <svg viewBox="0 0 24 24" width="16" height="16" class="ico-moon"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+          <svg viewBox="0 0 24 24" width="16" height="16" class="ico-sun" hidden><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.4v2.4M12 19.2v2.4M2.4 12h2.4M19.2 12h2.4M5.2 5.2l1.7 1.7M17.1 17.1l1.7 1.7M18.8 5.2l-1.7 1.7M6.9 17.1l-1.7 1.7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="stage" id="stage">
+      <section class="view" data-view="overview" hidden></section>
+      <section class="view view--flush" data-view="map" hidden></section>
+      <section class="view view--flush" data-view="ocean" hidden></section>
+      <section class="view" data-view="routing" hidden></section>
+      <section class="view" data-view="ops" hidden></section>
+      <section class="view" data-view="settlement" hidden></section>
+      <section class="view" data-view="runbook" hidden></section>
+    </main>
+  </div>
+</div>
+
+<div id="drawer" class="drawer" hidden aria-hidden="true"></div>
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+<div id="tip" class="tip" hidden></div>
+
+<noscript><div style="padding:48px;font:15px/1.7 system-ui;color:#ddd;background:#0b1220">
+  本指挥台需要启用 JavaScript。请在浏览器设置中允许脚本后刷新页面。
+</div></noscript>
+
+<script src="./assets/geo/geo.js"></script>
+<script src="./assets/js/core.js"></script>
+<script src="./assets/js/data.js"></script>
+<script src="./assets/js/charts.js"></script>
+<script src="./assets/js/map.js"></script>
+<script src="./assets/js/view-overview.js"></script>
+<script src="./assets/js/view-map.js"></script>
+<script src="./assets/js/view-ocean.js"></script>
+<script src="./assets/js/view-routing.js"></script>
+<script src="./assets/js/view-ops.js"></script>
+<script src="./assets/js/view-settlement.js"></script>
+<script src="./assets/js/view-runbook.js"></script>
+<script src="./assets/js/app.js"></script>
+</body>
+</html>
