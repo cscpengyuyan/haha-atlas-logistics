@@ -137,7 +137,7 @@
     let drag = null;
     svg.addEventListener('pointerdown', function (e) {
       if (e.button !== 0) return;
-      svg.setPointerCapture(e.pointerId);
+      try { svg.setPointerCapture(e.pointerId); } catch (err) { /* synthetic or already released */ }
       drag = { x: e.clientX, y: e.clientY, moved: 0 };
       svg.classList.add('is-panning');
     });
