@@ -42,6 +42,14 @@ npx serve .
 
 然后打开 <http://127.0.0.1:8977/>。
 
+**单文件离线版**：打开 `standalone.html`（CSS / JS / 地图数据全部内联，双击即可，无需服务器、无需联网）。
+适合发给不方便访问外网的同事，或投屏演示。
+
+## 上线地址
+
+- 在线：<https://cscpengyuyan.github.io/haha-atlas-logistics/>
+- 单文件：<https://cscpengyuyan.github.io/haha-atlas-logistics/standalone.html>
+
 ## 数据说明
 
 **本仓库全部为演示数据**：订单、航次、发票、异常均为固定种子生成的合成样本。
