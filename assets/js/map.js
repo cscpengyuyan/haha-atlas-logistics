@@ -100,7 +100,7 @@
     host.appendChild(svg);
 
     /* ── view transform ─────────────────────────────────────────────── */
-    const view = { k: 1.14, tx: -6, ty: -10 };
+    const view = { k: 1.1, tx: -14, ty: -8 };
     const MIN_K = 0.82, MAX_K = 16;
     function apply() {
       vb.setAttribute('transform', 'translate(' + view.tx.toFixed(2) + ' ' + view.ty.toFixed(2) + ') scale(' + view.k.toFixed(4) + ')');
@@ -245,7 +245,7 @@
         });
         if (Object.keys(groups).some(function (k) { return !/LGB|SEA/.test(k.split('>')[1]); })) {
           layers.gutter.appendChild(txt('text', {
-            x: GUTTER_X + 66, y: VB.y + VB.h - 6, fill: 'var(--txt-3)', 'font-size': 8, 'letter-spacing': '.1em'
+            x: 396, y: VB.y + VB.h - 8, fill: 'var(--txt-3)', 'font-size': 8, 'letter-spacing': '.1em'
           }, '经巴拿马 · 示意图'));
         }
 
@@ -363,7 +363,7 @@
       clampPan(); apply();
     };
     api.fitWindow = function () {
-      view.k = 1.14; view.tx = -6; view.ty = -10; apply();
+      view.k = 1.1; view.tx = -14; view.ty = -8; apply();
     };
     api.fitBounds = function (pts, pad) {
       if (!pts.length) return api.fitWindow();
