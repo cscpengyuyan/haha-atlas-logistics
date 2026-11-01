@@ -1,7 +1,7 @@
 /* ==========================================================================
-   map.js — ATLAS map engine
-   Albers-projected CONUS, pan/zoom, layered marks, ocean feeder lanes.
-   No external tile service: the basemap ships with the site.
+   map.js — ATLAS map engine (Apple-Maps-inspired)
+   Albers-projected CONUS. Momentum panning, pinch zoom, animated routes.
+   No external tiles: the basemap ships with the site as pre-projected SVG.
    ========================================================================== */
 (function (w) {
   'use strict';
@@ -28,7 +28,6 @@
     const p = albers(lon, lat);
     return [(p[0] - PR.minx) * PR.scale + PR.pad, (PR.maxy - p[1]) * PR.scale + PR.pad];
   }
-  // y for a latitude on the central meridian (used by the ocean gutter)
   function latY(lat) { return proj(PR.lon0, lat)[1]; }
   function milesToUnits(miles, lat) {
     const dl = miles / (69.172 * Math.cos((lat || 38) * RAD));
@@ -37,13 +36,15 @@
   }
 
   const VB = { x: -128, y: -12, w: G.vb[2] + 128 + 14, h: G.vb[3] + 24 };
-  const GUTTER_X = -86;
+  const GUTTER_X = -158;
+  // home camera keeps the whole CONUS to the right of the floating sidebar
+  const HOME = { k: 1.02, tx: -46, ty: -4 };
 
-  const COLORS = {
-    '待派': 'var(--amber)', '待命': 'var(--violet)', '已派': 'var(--blue)',
-    '执行中': 'var(--teal)', '已签收': 'var(--green)', '异常': 'var(--red)'
+  const STATUS_COLOR = {
+    '待派': 'var(--mv-orange)', '待命': 'var(--mv-purple)', '已派': 'var(--mv-blue)',
+    '执行中': 'var(--mv-teal)', '已签收': 'var(--mv-green)', '异常': 'var(--mv-red)'
   };
-  const LEVEL_COLORS = { L1: '#5b8def', L2: '#2dd4bf', L3: '#f5a524' };
+  const LEVEL_COLOR = { L1: 'var(--mv-blue)', L2: 'var(--mv-teal)', L3: 'var(--mv-orange)' };
 
   function el(tag, attrs) {
     const n = document.createElementNS(NS, tag);
@@ -51,27 +52,62 @@
     return n;
   }
   function txt(tag, attrs, s) { const n = el(tag, attrs); n.textContent = s; return n; }
+  function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }
 
   /* ── engine ───────────────────────────────────────────────────────── */
   A.MapEngine = function (host, opts) {
     opts = opts || {};
     const api = {};
     const svg = el('svg', {
-      class: 'map-svg', viewBox: [VB.x, VB.y, VB.w, VB.h].join(' '),
+      class: 'mv-svg', viewBox: [VB.x, VB.y, VB.w, VB.h].join(' '),
       preserveAspectRatio: 'xMidYMid meet', role: 'img',
-      'aria-label': '美国大件设备物流网络地图：仓库、区域站、订单点位与派车路线'
+      'aria-label': '美国大件设备物流网络地图'
     });
 
-    const vb = el('g', { id: 'vp' });
+    /* gradients + filters */
+    const defs = el('defs');
+    const glow = el('radialGradient', { id: 'mvGlow', cx: '46%', cy: '46%', r: '58%' });
+    glow.appendChild(el('stop', { offset: '0', 'stop-color': '#2b6fd6', 'stop-opacity': '.16' }));
+    glow.appendChild(el('stop', { offset: '1', 'stop-color': '#2b6fd6', 'stop-opacity': '0' }));
+    defs.appendChild(glow);
+
+    const landShadow = el('filter', { id: 'mvLandShadow', x: '-10%', y: '-10%', width: '120%', height: '120%' });
+    landShadow.appendChild(el('feDropShadow', { dx: '0', dy: '2', stdDeviation: '4', 'flood-color': '#000', 'flood-opacity': '.45' }));
+    defs.appendChild(landShadow);
+
+    const pinShadow = el('filter', { id: 'mvPinShadow', x: '-120%', y: '-120%', width: '340%', height: '340%' });
+    pinShadow.appendChild(el('feDropShadow', { dx: '0', dy: '1', stdDeviation: '1.1', 'flood-color': '#000', 'flood-opacity': '.6' }));
+    defs.appendChild(pinShadow);
+
+    const markerShadow = el('filter', { id: 'mvMarkShadow', x: '-80%', y: '-80%', width: '260%', height: '260%' });
+    markerShadow.appendChild(el('feDropShadow', { dx: '0', dy: '1.4', stdDeviation: '1.8', 'flood-color': '#000', 'flood-opacity': '.55' }));
+    defs.appendChild(markerShadow);
+
+    const routeGrad = el('linearGradient', { id: 'mvRoute', x1: '0', y1: '0', x2: '1', y2: '0' });
+    routeGrad.appendChild(el('stop', { offset: '0', 'stop-color': '#5aa9ff' }));
+    routeGrad.appendChild(el('stop', { offset: '1', 'stop-color': '#0a84ff' }));
+    defs.appendChild(routeGrad);
+    svg.appendChild(defs);
+
+    const vb = el('g', { class: 'mv-vp' });
     const layers = {};
-    ['grat', 'land', 'roads', 'stateLab', 'zones', 'lanes', 'gutter', 'routes', 'pins', 'nodes', 'routeLab'].forEach(function (k) {
-      layers[k] = el('g', { class: 'mp-layer mp-layer--' + k });
+    ['water', 'land', 'roads', 'stateLab', 'zones', 'lanes', 'gutter', 'routes', 'pins', 'nodes', 'routeLab'].forEach(function (k) {
+      layers[k] = el('g', { class: 'mv-layer mv-layer--' + k });
       vb.appendChild(layers[k]);
     });
     svg.appendChild(vb);
 
-    /* base map */
-    const grat = el('g');
+    /* ── static base ───────────────────────────────────────────────── */
+    layers.water.appendChild(el('rect', {
+      x: VB.x - 400, y: VB.y - 400, width: VB.w + 800, height: VB.h + 800,
+      fill: 'var(--mv-water)'
+    }));
+    layers.water.appendChild(el('rect', {
+      x: VB.x - 400, y: VB.y - 400, width: VB.w + 800, height: VB.h + 800,
+      fill: 'url(#mvGlow)'
+    }));
+
+    const grat = el('g', { class: 'mv-grat' });
     for (let lon = -130; lon <= -60; lon += 10) {
       const a = proj(lon, 24), b = proj(lon, 50);
       grat.appendChild(el('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1] }));
@@ -80,34 +116,98 @@
       const a = proj(-126, lat), b = proj(-66, lat);
       grat.appendChild(el('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1] }));
     }
-    grat.setAttribute('class', 'mp-grat');
-    layers.grat.appendChild(grat);
+    layers.water.appendChild(grat);
 
+    const landG = el('g', { filter: 'url(#mvLandShadow)' });
     G.states.forEach(function (s) {
-      layers.land.appendChild(el('path', { d: s.d, class: 'mp-land', 'data-st': s.a }));
+      landG.appendChild(el('path', { d: s.d, class: 'mv-land', 'data-st': s.a }));
     });
-    const roads = { other: 'mp-road mp-road--other', us: 'mp-road mp-road--us', inter: 'mp-road mp-road--inter' };
-    Object.keys(roads).forEach(function (k) {
+    layers.land.appendChild(landG);
+
+    // roads are drawn in three tiers, each with a dark casing so they read on the land fill
+    const roadPaths = {};
+    ['other', 'us', 'inter'].forEach(function (k) {
       if (!G.roads[k]) return;
-      layers.roads.appendChild(el('path', { d: G.roads[k], class: roads[k] }));
+      const c = el('path', { d: G.roads[k], class: 'mv-road-case mv-road-case--' + k });
+      const f = el('path', { d: G.roads[k], class: 'mv-road mv-road--' + k });
+      layers.roads.appendChild(c);
+      layers.roads.appendChild(f);
+      roadPaths[k] = { c: c, f: f };
     });
 
     G.states.forEach(function (s) {
       if (!s.a || s.a === 'DC') return;
-      layers.stateLab.appendChild(txt('text', { x: s.x, y: s.y, class: 'mp-state-label' }, s.a));
+      layers.stateLab.appendChild(txt('text', { x: s.x, y: s.y, class: 'mv-statelab' }, s.a));
     });
+
+    // city dots + labels for the major metros (major tier always visible)
+    const cityMajor = el('g', { class: 'mv-cities mv-cities--major' });
+    const cityMinor = el('g', { class: 'mv-cities mv-cities--minor' });
+    (G.places || []).slice(0, 26).forEach(function (p, i) {
+      const g = el('g', { transform: 'translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')' });
+      g.appendChild(el('circle', { r: 1.5, class: 'mv-citydot' }));
+      g.appendChild(txt('text', { x: 3.4, y: 2, class: 'mv-citylab' }, p.n));
+      (i < 8 ? cityMajor : cityMinor).appendChild(g);
+    });
+    layers.stateLab.appendChild(cityMinor);
+    layers.stateLab.appendChild(cityMajor);
 
     host.appendChild(svg);
 
-    /* ── view transform ─────────────────────────────────────────────── */
-    const view = { k: 1.1, tx: -14, ty: -8 };
-    const MIN_K = 0.82, MAX_K = 16;
+    /* ── view transform + motion ────────────────────────────────────── */
+    const view = Object.assign({}, HOME);
+    const MIN_K = 0.85, MAX_K = 18;
+    let raf = null;
+
     function apply() {
+      // hard guard: a bad camera value must never blank the map
+      if (!isFinite(view.k) || view.k <= 0) view.k = HOME.k;
+      if (view.k < MIN_K) view.k = MIN_K;
+      if (view.k > MAX_K) view.k = MAX_K;
+      if (!isFinite(view.tx)) view.tx = HOME.tx;
+      if (!isFinite(view.ty)) view.ty = HOME.ty;
       vb.setAttribute('transform', 'translate(' + view.tx.toFixed(2) + ' ' + view.ty.toFixed(2) + ') scale(' + view.k.toFixed(4) + ')');
       const k = view.k;
-      layers.stateLab.style.opacity = k > 1.55 ? Math.min(1, (k - 1.55) * 1.6) : 0;
-      layers.roads.style.opacity = k > 0.95 ? 1 : 0.7;
+      layers.stateLab.style.opacity = k < 2.4 ? Math.max(0, (2.4 - k) / 0.7) : 0;
+      cityMinor.style.opacity = k >= 1.9 ? Math.min(1, (k - 1.9) * 1.6) : 0;
+      layers.roads.style.opacity = 1;
+
+      // road hierarchy: widths and emphasis follow the zoom level
+      const w = {
+        inter: k < 1.3 ? 1.15 : k < 2.2 ? 1.55 : k < 4 ? 2.0 : 2.6,
+        us: k < 1.3 ? 0.85 : k < 2.2 ? 1.05 : k < 4 ? 1.4 : 1.8,
+        other: k < 1.3 ? 0.6 : k < 2.2 ? 0.75 : k < 4 ? 1.05 : 1.35
+      };
+      const op = {
+        inter: 1,
+        us: k < 1.3 ? 0.92 : 1,
+        other: k < 1.3 ? 0.62 : k < 2.2 ? 0.82 : 1
+      };
+      Object.keys(roadPaths).forEach(function (key) {
+        const rp = roadPaths[key];
+        if (!rp) return;
+        rp.f.style.strokeWidth = w[key].toFixed(2) + 'px';
+        rp.f.style.opacity = op[key];
+        rp.c.style.strokeWidth = (w[key] + (key === 'inter' ? 1.5 : 1.15)).toFixed(2) + 'px';
+        rp.c.style.opacity = op[key] * 0.9;
+      });
+
+      // labels & badges stay a constant on-screen size
+      const s = (1 / k).toFixed(3);
+      for (let i = 0; i < kpts.length; i++) kpts[i].setAttribute('transform', 'scale(' + s + ')');
+      if (opts.onView) opts.onView({ zoom: k });
     }
+    let kpts = [];
+    function refreshKpts() { kpts = Array.prototype.slice.call(vb.querySelectorAll('.mv-kpt')); }
+
+    function clampPan() {
+      // the allowed translate grows with the zoom level, otherwise a zoomed-in
+      // view cannot be centred on anything away from the middle of the country
+      const lim = VB.w * Math.max(1, view.k) * 0.82;
+      view.tx = clamp(view.tx, -lim, lim);
+      view.ty = clamp(view.ty, -lim * 0.72, lim * 0.72);
+    }
+
     function toBase(evt) {
       const pt = svg.createSVGPoint();
       pt.x = evt.clientX; pt.y = evt.clientY;
@@ -116,67 +216,142 @@
       const p = pt.matrixTransform(m.inverse());
       return { x: p.x, y: p.y };
     }
-    function zoomAt(factor, basePt) {
-      const p = basePt || { x: VB.x + VB.w / 2, y: VB.y + VB.h / 2 };
-      const k2 = A.clamp(view.k * factor, MIN_K, MAX_K);
-      const cx = (p.x - view.tx) / view.k, cy = (p.y - view.ty) / view.k;
-      view.k = k2;
-      view.tx = p.x - cx * k2;
-      view.ty = p.y - cy * k2;
-      clampPan();
-      apply();
-      if (opts.onZoom) opts.onZoom(view.k);
-    }
-    function clampPan() {
-      const lim = VB.w * 0.72;
-      view.tx = A.clamp(view.tx, -lim, lim);
-      view.ty = A.clamp(view.ty, -lim * 0.62, lim * 0.62);
+
+    /* animated camera — timer driven so it also runs where rAF is throttled */
+    let camAnim = null;
+    function stopCam() { if (camAnim) { clearTimeout(camAnim); camAnim = null; } }
+    function animateView(end, ms) {
+      stopCam();
+      const s = { k: view.k, tx: view.tx, ty: view.ty };
+      const t0 = (w.performance || Date).now(), dur = ms || 420;
+      function step() {
+        const t = Math.min(1, ((w.performance || Date).now() - t0) / dur);
+        const e = 1 - Math.pow(1 - t, 3);
+        view.k = s.k + (end.k - s.k) * e;
+        view.tx = s.tx + (end.tx - s.tx) * e;
+        view.ty = s.ty + (end.ty - s.ty) * e;
+        clampPan(); apply();
+        camAnim = t < 1 ? setTimeout(step, 16) : null;
+      }
+      step();
     }
 
-    /* pointer interactions */
-    let drag = null;
+    function zoomAt(factor, basePt, animate) {
+      const target = clamp(view.k * factor, MIN_K, MAX_K);
+      const p = basePt || { x: VB.x + VB.w / 2, y: VB.y + VB.h / 2 };
+      const cx = (p.x - view.tx) / view.k, cy = (p.y - view.ty) / view.k;
+      const end = { k: target, tx: p.x - cx * target, ty: p.y - cy * target };
+      if (animate) { animateView(end, 300); return; }
+      stopCam();
+      Object.assign(view, end);
+      clampPan(); apply();
+    }
+
+    /* ── pointer handling: drag with momentum, pinch ────────────────── */
+    const pointers = new Map();
+    let drag = null, lastMove = 0, pinch = null;
+    let vel = { x: 0, y: 0 };
+    let momentum = null;
+
+    function stopMomentum() { if (momentum) { cancelAnimationFrame(momentum); momentum = null; } }
+
+    function startMomentum() {
+      stopMomentum();
+      const step = function () {
+        vel.x *= 0.93; vel.y *= 0.93;
+        if (Math.abs(vel.x) < 0.05 && Math.abs(vel.y) < 0.05) { momentum = null; return; }
+        view.tx += vel.x; view.ty += vel.y;
+        clampPan(); apply();
+        momentum = requestAnimationFrame(step);
+      };
+      momentum = requestAnimationFrame(step);
+    }
+
     svg.addEventListener('pointerdown', function (e) {
-      if (e.button !== 0) return;
-      try { svg.setPointerCapture(e.pointerId); } catch (err) { /* synthetic or already released */ }
-      drag = { x: e.clientX, y: e.clientY, moved: 0 };
-      svg.classList.add('is-panning');
+      if (e.button != null && e.button !== 0) return;
+      stopMomentum();
+      try { svg.setPointerCapture(e.pointerId); } catch (err) { }
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 1) {
+        drag = { x: e.clientX, y: e.clientY, moved: 0, t: performance.now(), sx: e.clientX, sy: e.clientY };
+        svg.classList.add('is-panning');
+        vel = { x: 0, y: 0 };
+      } else if (pointers.size === 2) {
+        const p = Array.from(pointers.values());
+        pinch = {
+          dist: Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y),
+          k: view.k,
+          mid: { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 }
+        };
+        drag = null;
+      }
     });
+
     svg.addEventListener('pointermove', function (e) {
+      if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (pinch && pointers.size >= 2) {
+        const p = Array.from(pointers.values());
+        const d = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+        if (pinch.dist > 0) {
+          const f = d / pinch.dist;
+          const base = toBase({ clientX: pinch.mid.x, clientY: pinch.mid.y });
+          const cx = (base.x - view.tx) / view.k, cy = (base.y - view.ty) / view.k;
+          view.k = clamp(pinch.k * f, MIN_K, MAX_K);
+          view.tx = base.x - cx * view.k;
+          view.ty = base.y - cy * view.k;
+          clampPan(); apply();
+        }
+        return;
+      }
+
       if (drag) {
         const r = svg.getBoundingClientRect();
         const sx = VB.w / r.width, sy = VB.h / r.height;
         const dx = (e.clientX - drag.x) * sx, dy = (e.clientY - drag.y) * sy;
+        const now = performance.now();
+        const dt = Math.max(8, now - drag.t);
+        vel.x = vel.x * 0.55 + (dx / dt * 16) * 0.45;
+        vel.y = vel.y * 0.55 + (dy / dt * 16) * 0.45;
+        drag.t = now;
         drag.moved += Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y);
         view.tx += dx; view.ty += dy;
         drag.x = e.clientX; drag.y = e.clientY;
         clampPan(); apply();
         return;
       }
+
       const t = e.target.closest('[data-type]');
       if (t) hover(t.dataset.type, t.dataset.id, e);
       else if (api._hovering) { api._hovering = false; if (opts.onHover) opts.onHover(null); }
     });
-    function endDrag(e) {
-      if (!drag) return;
+
+    function endPointer(e) {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (!drag) { if (pointers.size === 0) svg.classList.remove('is-panning'); return; }
       svg.classList.remove('is-panning');
-      const quick = drag.moved < 5;
+      const quick = drag.moved < 6;
+      const speed = Math.hypot(vel.x, vel.y);
       drag = null;
       if (quick) {
         const t = e.target.closest('[data-type]');
         if (t) { select(t.dataset.type, t.dataset.id); if (opts.onSelect) opts.onSelect(t.dataset.type, t.dataset.id); }
         else if (opts.onSelect) opts.onSelect(null, null);
+      } else if (speed > 1.2) {
+        startMomentum();
       }
     }
-    svg.addEventListener('pointerup', endDrag);
-    svg.addEventListener('pointercancel', function () { drag = null; svg.classList.remove('is-panning'); });
+    svg.addEventListener('pointerup', endPointer);
+    svg.addEventListener('pointercancel', function (e) { pointers.delete(e.pointerId); drag = null; pinch = null; svg.classList.remove('is-panning'); });
 
     svg.addEventListener('wheel', function (e) {
       e.preventDefault();
-      const f = Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0016));
-      zoomAt(f, toBase(e));
+      const f = Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.06 : 0.0022));
+      zoomAt(f, toBase(e), false);
     }, { passive: false });
 
-    svg.addEventListener('dblclick', function (e) { zoomAt(1.7, toBase(e)); });
+    svg.addEventListener('dblclick', function (e) { zoomAt(1.8, toBase(e), true); });
 
     function hover(type, id, e) {
       api._hovering = true;
@@ -187,7 +362,7 @@
     let sel = null;
     function select(type, id) {
       sel = type ? { type, id } : null;
-      Array.from(svg.querySelectorAll('.mp-pin.is-sel,.mp-node.is-sel')).forEach(function (n) { n.classList.remove('is-sel'); });
+      Array.from(svg.querySelectorAll('.is-sel')).forEach(function (n) { n.classList.remove('is-sel'); });
       if (!type) return;
       const n = svg.querySelector('[data-type="' + type + '"][data-id="' + id + '"]');
       if (n) n.classList.add('is-sel');
@@ -196,24 +371,24 @@
 
     function clear(g) { while (g.firstChild) g.removeChild(g.firstChild); }
 
+    let planKey = '';
+
     api.render = function (d) {
       const state = d.state;
-      const layersOn = state.ui.mapLayers || {};
-      const filter = d.filter || {};
+      const lz = state.ui.mapLayers || {};
 
-      /* ocean gutter + lanes */
-      clear(layers.gutter);
-      clear(layers.lanes);
-      if (layersOn.lanes !== false) {
+      /* ocean feeder */
+      clear(layers.gutter); clear(layers.lanes);
+      if (lz.lanes !== false && d.ocean && d.ocean.length) {
         const gx = GUTTER_X;
         layers.gutter.appendChild(el('line', {
-          x1: -16, y1: latY(20), x2: -16, y2: latY(44),
-          stroke: 'var(--line)', 'stroke-width': 1, 'stroke-dasharray': '3 4', opacity: .8
+          x1: -18, y1: latY(21), x2: -18, y2: latY(43),
+          class: 'mv-shore'
         }));
         layers.gutter.appendChild(txt('text', {
-          x: gx - 26, y: latY(42) - 10, fill: 'var(--txt-3)', 'font-size': 8.5,
-          'letter-spacing': '.14em', transform: 'rotate(-90 ' + (gx - 26) + ' ' + (latY(42) - 10) + ')'
-        }, '中国起运港 · POL'));
+          x: gx - 30, y: latY(42), class: 'mv-gutter-label',
+          transform: 'rotate(-90 ' + (gx - 30) + ' ' + latY(42) + ')'
+        }, '中国起运港'));
 
         const groups = {};
         d.ocean.forEach(function (s) {
@@ -231,7 +406,6 @@
             const mx = (gx + txp[0]) / 2;
             path = 'M' + gx + ' ' + fy + ' Q' + mx + ' ' + (fy - 26) + ' ' + txp[0].toFixed(1) + ' ' + txp[1].toFixed(1);
           } else {
-            // via Panama: down the gutter, across the bottom, up to the Atlantic / Gulf port
             const by = VB.y + VB.h - 22;
             path = 'M' + gx + ' ' + fy +
               ' Q' + (gx - 10) + ' ' + (fy + 60) + ' ' + (gx + 18) + ' ' + (by - 30) +
@@ -240,144 +414,217 @@
               ' Q' + (txp[0] - 20) + ' ' + by + ' ' + txp[0].toFixed(1) + ' ' + (by - 34) +
               ' Q' + txp[0].toFixed(1) + ' ' + (by - 46) + ' ' + txp[0].toFixed(1) + ' ' + (txp[1] + 4).toFixed(1);
           }
-          layers.lanes.appendChild(el('path', { d: path, class: 'mp-lane-glow' }));
-          layers.lanes.appendChild(el('path', { d: path, class: 'mp-lane', style: 'animation-delay:' + (Math.random() * -18).toFixed(1) + 's' }));
+          layers.lanes.appendChild(el('path', { d: path, class: 'mv-lane-glow' }));
+          layers.lanes.appendChild(el('path', { d: path, class: 'mv-lane' }));
         });
-        if (Object.keys(groups).some(function (k) { return !/LGB|SEA/.test(k.split('>')[1]); })) {
-          layers.gutter.appendChild(txt('text', {
-            x: 396, y: VB.y + VB.h - 8, fill: 'var(--txt-3)', 'font-size': 8, 'letter-spacing': '.1em'
-          }, '经巴拿马 · 示意图'));
-        }
+        layers.gutter.appendChild(txt('text', {
+          x: 396, y: VB.y + VB.h - 8, class: 'mv-gutter-note'
+        }, '经巴拿马 · 示意'));
 
-        // origin ports (China side, schematic gutter column)
         const seen = {};
         d.ocean.forEach(function (s) { seen[s.lane.from] = true; });
         Object.keys(seen).forEach(function (code) {
           const p = A.C.PORTS[code];
-          const y = latY(p.lat);
-          const g = el('g', { class: 'mp-node', 'data-type': 'port', 'data-id': code, transform: 'translate(' + GUTTER_X + ',' + y.toFixed(1) + ')' });
-          g.appendChild(el('circle', { r: 6, fill: 'none', stroke: 'var(--teal)', 'stroke-width': 1, opacity: .45 }));
-          g.appendChild(el('circle', { r: 2.6, fill: 'var(--teal)' }));
-          g.appendChild(txt('text', { x: 10, y: 3, fill: 'var(--txt-2)', 'font-size': 8.5, 'font-weight': 600 }, p.code));
-          g.appendChild(txt('text', { x: 10, y: 12, fill: 'var(--txt-3)', 'font-size': 7 }, p.name));
+          const g = el('g', {
+            class: 'mv-port', 'data-type': 'port', 'data-id': code,
+            transform: 'translate(' + GUTTER_X + ',' + latY(p.lat).toFixed(1) + ')'
+          });
+          const kp = el('g', { class: 'mv-kpt' });
+          kp.appendChild(el('circle', { r: 3.4, class: 'mv-port-dot' }));
+          kp.appendChild(txt('text', { x: 8, y: 2.6, class: 'mv-port-code' }, p.code));
+          kp.appendChild(txt('text', { x: 8, y: 10.4, class: 'mv-port-name' }, p.name));
+          g.appendChild(kp);
           layers.gutter.appendChild(g);
         });
-        // destination ports
         const destSeen = {};
         d.ocean.forEach(function (s) { destSeen[s.lane.to] = true; });
         Object.keys(destSeen).forEach(function (code) {
           const p = A.C.PORTS[code];
           const xy = proj(p.lng, p.lat);
-          const g = el('g', { class: 'mp-node', 'data-type': 'port', 'data-id': code, transform: 'translate(' + xy[0].toFixed(1) + ',' + xy[1].toFixed(1) + ')' });
-          g.appendChild(el('circle', { r: 4.5, fill: 'none', stroke: 'var(--teal)', 'stroke-width': 1.2, opacity: .55 }));
-          g.appendChild(el('circle', { r: 2.2, fill: 'var(--teal)' }));
-          g.appendChild(txt('text', { x: -6, y: -6, fill: 'var(--teal)', 'font-size': 7.5, 'font-weight': 700, 'text-anchor': 'end' }, p.code));
+          const g = el('g', {
+            class: 'mv-port', 'data-type': 'port', 'data-id': code,
+            transform: 'translate(' + xy[0].toFixed(1) + ',' + xy[1].toFixed(1) + ')'
+          });
+          const kp = el('g', { class: 'mv-kpt' });
+          kp.appendChild(el('circle', { r: 2.8, class: 'mv-port-dot' }));
+          kp.appendChild(txt('text', { x: -5, y: -5, class: 'mv-port-code', 'text-anchor': 'end' }, p.code));
+          g.appendChild(kp);
           layers.nodes.appendChild(g);
         });
       }
 
-      /* coverage zones */
+      /* coverage rings */
       clear(layers.zones);
-      if (layersOn.zones) {
+      if (lz.zones) {
         d.nodes.forEach(function (n) {
           const xy = proj(n.lng, n.lat);
-          const r = milesToUnits(150, n.lat);
-          layers.zones.appendChild(el('circle', { cx: xy[0], cy: xy[1], r: r, class: 'mp-ringzone' }));
+          layers.zones.appendChild(el('circle', {
+            cx: xy[0], cy: xy[1], r: milesToUnits(150, n.lat), class: 'mv-zone'
+          }));
         });
       }
 
       /* planned route */
-      clear(layers.routes);
-      clear(layers.routeLab);
+      clear(layers.routes); clear(layers.routeLab);
       const plan = d.draft && d.draft.plan;
+      const newKey = plan ? plan.stops.join(',') + '|' + plan.origin : '';
+      const animateRoute = newKey !== planKey && !!newKey;
+      planKey = newKey;
+
       if (plan && plan.legs && plan.legs.length) {
         const pts = [];
         const origin = A.C.nodeById[plan.origin];
         pts.push(proj(origin.lng, origin.lat));
         plan.legs.forEach(function (l) { pts.push(proj(l.to.lng, l.to.lat)); });
         const dpath = pts.map(function (p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(' ');
-        layers.routes.appendChild(el('path', { d: dpath, class: 'mp-route-halo' }));
-        layers.routes.appendChild(el('path', { d: dpath, class: 'mp-route' }));
+
+        const halo = el('path', { d: dpath, class: 'mv-route-halo' });
+        const line = el('path', { d: dpath, class: 'mv-route' });
+        const dash = el('path', { d: dpath, class: 'mv-route-dash' });
+        if (animateRoute) {
+          const total = line.getTotalLength ? line.getTotalLength() : 0;
+          // measure after insertion for a proper draw-in
+          requestAnimationFrame(function () {
+            try {
+              const L = line.getTotalLength();
+              line.style.strokeDasharray = L;
+              line.style.strokeDashoffset = L;
+              line.style.transition = 'stroke-dashoffset .62s cubic-bezier(.32,.72,0,1)';
+              requestAnimationFrame(function () { line.style.strokeDashoffset = '0'; });
+            } catch (e) { }
+          });
+        }
+        layers.routes.appendChild(halo);
+        layers.routes.appendChild(line);
+        layers.routes.appendChild(dash);
+
         plan.legs.forEach(function (l, i) {
           const p = proj(l.to.lng, l.to.lat);
-          const g = el('g', { transform: 'translate(' + p[0].toFixed(1) + ',' + p[1].toFixed(1) + ')' });
-          g.appendChild(el('circle', { r: 6.4, fill: 'var(--amber)', stroke: '#070b12', 'stroke-width': 1.4, opacity: .95 }));
-          g.appendChild(txt('text', { y: 2.4, 'text-anchor': 'middle', 'font-size': 6.6, 'font-weight': 800, fill: '#221503' }, String(i + 1)));
+          const g = el('g', { class: 'mv-stopmark', transform: 'translate(' + p[0].toFixed(1) + ',' + p[1].toFixed(1) + ')' });
+          const anim = el('g', { class: 'mv-stopanim' });
+          if (animateRoute) anim.style.animation = 'mvDrop .42s cubic-bezier(.34,1.4,.64,1) ' + (0.06 + i * 0.07) + 's both';
+          const kp = el('g', { class: 'mv-kpt' });
+          kp.appendChild(el('circle', { r: 5.6, class: 'mv-stopmark-bg' }));
+          kp.appendChild(txt('text', { y: 2.1, class: 'mv-stopmark-n' }, String(i + 1)));
+          kp.appendChild(txt('text', { y: -8.4, class: 'mv-stopmark-time' }, l.late ? '迟到' : l.window.from));
+          anim.appendChild(kp);
+          g.appendChild(anim);
           layers.routeLab.appendChild(g);
         });
       }
 
       /* order pins */
       clear(layers.pins);
-      if (layersOn.pins !== false) {
+      if (lz.pins !== false) {
         const byLevel = d.colorBy === 'level';
+        // orders that share a rooftop would hide each other — fan them out slightly
+        const clusters = {};
         d.orders.forEach(function (o) {
+          const key = o.lat.toFixed(3) + ',' + o.lng.toFixed(3);
+          (clusters[key] = clusters[key] || []).push(o);
+        });
+        const offset = {};
+        Object.keys(clusters).forEach(function (key) {
+          const list = clusters[key];
+          if (list.length < 2) return;
+          const r = 1.35 * Math.sqrt(list.length - 1);
+          list.forEach(function (o, i) {
+            const a = (i / list.length) * Math.PI * 2 - Math.PI / 2;
+            offset[o.id] = { x: Math.cos(a) * r, y: Math.sin(a) * r };
+          });
+        });
+        d.orders.forEach(function (o, i) {
           const p = proj(o.lng, o.lat);
-          const col = byLevel ? LEVEL_COLORS[o.level] : (COLORS[o.status] || 'var(--txt-3)');
-          const r = 2.9 + (o.units - 1) * 0.7;
+          const off = offset[o.id] || { x: 0, y: 0 };
+          const col = byLevel ? LEVEL_COLOR[o.level] : (STATUS_COLOR[o.status] || 'var(--mv-label-3)');
+          const r = 3.5 + (o.units - 1) * 0.6;
           const g = el('g', {
-            class: 'mp-pin', transform: 'translate(' + p[0].toFixed(1) + ',' + p[1].toFixed(1) + ')',
+            class: 'mv-pin', transform: 'translate(' + (p[0] + off.x).toFixed(1) + ',' + (p[1] + off.y).toFixed(1) + ')',
             'data-type': 'order', 'data-id': o.id
           });
-          g.appendChild(el('circle', { class: 'hit', r: 7.5 }));
-          if (o.status === '异常') {
-            g.appendChild(el('circle', { r: r + 2.2, fill: 'none', stroke: 'var(--red)', 'stroke-width': .9, opacity: .8 }));
-          }
-          g.appendChild(el('circle', { class: 'dot', r: r, fill: col }));
+          const inner = el('g', { class: 'mv-pin-in' });
+          if (d.animateIn) inner.style.animation = 'mvPinIn .36s cubic-bezier(.34,1.3,.64,1) ' + Math.min(0.45, i * 0.005) + 's both';
+          inner.appendChild(el('circle', { class: 'mv-pin-hit', r: 7.5 }));
+          if (o.status === '异常') inner.appendChild(el('circle', { class: 'mv-pin-halo', r: r + 3.2 }));
+          inner.appendChild(el('circle', { class: 'mv-pin-dot', r: r, fill: col }));
+          g.appendChild(inner);
           layers.pins.appendChild(g);
         });
       }
 
-      /* warehouse + station nodes */
+      /* nodes */
       clear(layers.nodes);
-      if (layersOn.nodes !== false) {
+      if (lz.nodes !== false) {
         d.nodes.forEach(function (n) {
-          if (filter.node && filter.node !== n.id) return;
           const p = proj(n.lng, n.lat);
-          const g = el('g', { class: 'mp-node', transform: 'translate(' + p[0].toFixed(1) + ',' + p[1].toFixed(1) + ')', 'data-type': 'node', 'data-id': n.id });
           const isInv = n.kind === 'inv';
-          g.appendChild(el('circle', { class: 'ring', r: isInv ? 9.5 : 7.5, stroke: isInv ? 'var(--amber)' : 'var(--violet)' }));
-          g.appendChild(el('circle', { r: isInv ? 4.2 : 3.2, fill: isInv ? 'var(--amber)' : 'var(--violet)' }));
-          g.appendChild(el('circle', { class: 'core', r: isInv ? 4.2 : 3.2, fill: 'none' }));
-          g.appendChild(txt('text', {
-            x: 0, y: isInv ? 17 : 14.5, 'text-anchor': 'middle', 'font-size': 6.4,
-            'font-weight': 700, fill: 'var(--txt-2)', 'paint-order': 'stroke',
-            stroke: 'var(--bg)', 'stroke-width': 2.2, 'stroke-linejoin': 'round'
-          }, n.id));
-          if (n.pilot) {
-            g.appendChild(txt('text', { x: 0, y: -13, 'text-anchor': 'middle', 'font-size': 5.8, fill: 'var(--amber)', 'letter-spacing': '.08em', 'font-weight': 700 }, 'PILOT'));
-          }
+          const isOrigin = d.draft && d.draft.origin === n.id;
+          const g = el('g', {
+            class: 'mv-node' + (isOrigin ? ' is-origin' : ''),
+            transform: 'translate(' + p[0].toFixed(1) + ',' + p[1].toFixed(1) + ')',
+            'data-type': 'node', 'data-id': n.id
+          });
+          g.appendChild(el('circle', { r: 11, class: 'mv-node-hit' }));
+          g.appendChild(el('circle', { r: isInv ? 6.2 : 4.8, class: 'mv-node-ring' }));
+          g.appendChild(el('circle', { r: isInv ? 3.6 : 2.8, class: 'mv-node-core' }));
+          g.appendChild(el('circle', { r: isInv ? 6.2 : 4.8, class: 'mv-node-pulse' }));
+          const label = el('g', { class: 'mv-kpt mv-nodelab' });
+          label.appendChild(el('rect', {
+            x: -(n.id.length * 2.5 + 7), y: isInv ? 11 : 9.4, width: n.id.length * 5 + 14,
+            height: 11, rx: 5.5, class: 'mv-nodelab-bg'
+          }));
+          label.appendChild(txt('text', { y: isInv ? 19 : 17.4, class: 'mv-nodelab-t', 'text-anchor': 'middle' }, n.id));
+          g.appendChild(label);
           layers.nodes.appendChild(g);
         });
       }
 
+      refreshKpts();
+      apply();
       if (sel) select(sel.type, sel.id);
     };
 
-    /* ── camera helpers ─────────────────────────────────────────────── */
-    api.focusOn = function (lon, lat, k) {
+    /* ── camera ─────────────────────────────────────────────────────── */
+    api.focusOn = function (lon, lat, k, animate) {
       const p = proj(lon, lat);
-      view.k = A.clamp(k || 4, MIN_K, MAX_K);
-      view.tx = VB.x + VB.w / 2 - p[0] * view.k;
-      view.ty = VB.y + VB.h / 2 - p[1] * view.k;
-      clampPan(); apply();
+      const target = clamp(k || 4, MIN_K, MAX_K);
+      // keep the point inside the visible band, not the raw canvas centre
+      const cx = VB.x + VB.w * 0.56, cy = VB.y + VB.h * 0.5;
+      const end = { k: target, tx: cx - p[0] * target, ty: cy - p[1] * target };
+      stopMomentum();
+      if (animate === false) { stopCam(); Object.assign(view, end); clampPan(); apply(); return; }
+      animateView(end, 480);
     };
-    api.fitWindow = function () {
-      view.k = 1.1; view.tx = -14; view.ty = -8; apply();
+    api.fitWindow = function (animate) {
+      const r = svg.getBoundingClientRect();
+      api.fitRect({ l: 8, t: 8, r: r.width - 8, b: r.height - 8 }, animate);
     };
-    api.fitBounds = function (pts, pad) {
-      if (!pts.length) return api.fitWindow();
-      const xs = pts.map(function (p) { return p[0]; }), ys = pts.map(function (p) { return p[1]; });
-      const minx = Math.min.apply(null, xs), maxx = Math.max.apply(null, xs);
-      const miny = Math.min.apply(null, ys), maxy = Math.max.apply(null, ys);
-      const bw = Math.max(60, maxx - minx), bh = Math.max(60, maxy - miny);
-      const k = A.clamp(Math.min(VB.w / (bw + (pad || 120)), VB.h / (bh + (pad || 120))), MIN_K, 7);
-      view.k = k;
-      view.tx = VB.x + VB.w / 2 - ((minx + maxx) / 2) * k;
-      view.ty = VB.y + VB.h / 2 - ((miny + maxy) / 2) * k;
-      clampPan(); apply();
+    /**
+     * Frame the CONUS bounding box inside a rectangle of the stage (CSS px).
+     * Keeps the country clear of the floating panels instead of centring on the
+     * whole canvas.
+     */
+    const BOX = { x0: 6, y0: 6, x1: 994, y1: 618 };
+    api.fitRect = function (rect, animate) {
+      const r = svg.getBoundingClientRect();
+      const W = r.width, H = r.height;
+      if (!W || !H) return;
+      const S = Math.min(W / VB.w, H / VB.h);
+      const pad = 12;
+      const kx = (rect.r - rect.l - pad) / (S * (BOX.x1 - BOX.x0));
+      const ky = (rect.b - rect.t - pad) / (S * (BOX.y1 - BOX.y0));
+      const k = clamp(Math.min(kx, ky), MIN_K, MAX_K);
+      const cx = (rect.l + rect.r) / 2, cy = (rect.t + rect.b) / 2;
+      const tx = (cx - W / 2) / S + VB.x + VB.w / 2 - k * (BOX.x0 + BOX.x1) / 2;
+      const ty = (cy - H / 2) / S + VB.y + VB.h / 2 - k * (BOX.y0 + BOX.y1) / 2;
+      const end = { k, tx, ty };
+      stopMomentum();
+      if (!animate) { stopCam(); Object.assign(view, end); apply(); return; }
+      animateView(end, 460);
     };
-    api.zoom = function (f) { zoomAt(f); };
+    api.zoomIn = function () { zoomAt(1.55, null, true); };
+    api.zoomOut = function () { zoomAt(0.64, null, true); };
+    api.getZoom = function () { return view.k; };
     api.proj = proj;
     api.view = view;
     api.destroy = function () { if (svg.parentNode) svg.parentNode.removeChild(svg); };
