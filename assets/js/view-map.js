@@ -33,9 +33,9 @@
     return h * 60 + (m || 0);
   }
 
-  function planStops(originId, picks, strategy) {
+  function planStops(originId, picks, strategy, state) {
     const origin = A.C.nodeById[originId];
-    const pts = picks.map(function (id) { return view.state.orders.find((o) => o.id === id); }).filter(Boolean);
+    const pts = picks.map(function (id) { return state.orders.find((o) => o.id === id); }).filter(Boolean);
     if (strategy === 'nearest') {
       const rest = pts.slice(), seq = [];
       let cur = origin;
@@ -59,7 +59,7 @@
   function buildPlan(state, originId, stopIds, strategy) {
     const origin = A.C.nodeById[originId];
     if (!origin || !stopIds.length) return null;
-    const seq = planStops(originId, stopIds, strategy);
+    const seq = planStops(originId, stopIds, strategy, state);
     const legs = [];
     let clock = 8 * 60;           // 仓口可放货时刻（演示：08:00）
     let prev = origin, totalMiles = 0, totalDrive = 0, violations = 0, waitTotal = 0;
