@@ -120,6 +120,14 @@ html[data-theme="light"] *::-webkit-scrollbar-thumb{background:#c6d2e1;backgroun
   backdrop-filter:blur(10px);
 }
 html[data-theme="light"] .rail{background:linear-gradient(180deg,#fff,#f6f9fc)}
+html[data-theme="light"] .btn--prime{
+  background:linear-gradient(180deg,#3b82f6,#2563eb);border-color:#1d4ed8;color:#fff;
+  box-shadow:0 1px 0 rgba(255,255,255,.28) inset,0 8px 18px -10px rgba(37,99,235,.95);
+}
+html[data-theme="light"] .btn--prime:hover{filter:brightness(1.05)}
+html[data-theme="light"] .nav-item.is-on{background:rgba(37,99,235,.10);color:#1d4ed8}
+html[data-theme="light"] .nav-item.is-on::before{background:#2563eb}
+html[data-theme="light"] .brandmark{color:#1d4ed8}
 .rail-brand{display:flex;align-items:center;gap:10px;padding:17px 16px 15px;border-bottom:1px solid var(--line-soft)}
 .rail-logo{width:30px;height:30px;color:var(--amber);flex:none}
 .rail-brandtxt{display:grid;line-height:1.15;min-width:0}
