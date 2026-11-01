@@ -171,15 +171,16 @@
         g.items.slice(0, 40).map(function (o) {
           const q = A.pricing.quote(o, 'B');
           const inPlan = s.draft.stops.includes(o.id);
-          return '<button class="mv-row' + (o.id === selId ? ' is-sel' : '') + (inPlan ? ' is-in' : '') + '" data-act="pick" data-id="' + o.id + '">' +
+          return '<div class="mv-row' + (o.id === selId ? ' is-sel' : '') + (inPlan ? ' is-in' : '') + '" data-act="pick" data-id="' + o.id + '" role="button" tabindex="0">' +
             '<span class="mv-row-dot">' + statusDot(o.status) + '</span>' +
             '<span class="mv-row-main">' +
             '<span class="mv-row-t">' + o.city + '<i>' + o.st + ' ' + o.zip + '</i></span>' +
             '<span class="mv-row-s">' + o.model + ' ×' + o.units + ' · ' + o.level + (o.l4 ? '+L4' : '') + ' · ' + winText(o) + '</span>' +
             '</span>' +
             '<span class="mv-row-end">' + (inPlan ? '<span class="mv-inplan">已选</span>' : '<b>' + money(q ? q.total : 0) + '</b>') +
-            '<svg class="mv-chev" viewBox="0 0 24 24" width="12" height="12"><path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
-            '</button>';
+            (inPlan ? '' : '<span class="mv-quick" data-act="quick-add" data-id="' + o.id + '" title="加入派车计划">' +
+              '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg></span>') +
+            '</span></div>';
         }).join('') + '</div>';
     }).join('');
   }
@@ -314,6 +315,7 @@
       '<span>' + fmt.n(plan.miles) + ' mi · ' + fmt.dur(plan.drive) + ' · 收车 ' + hhmm(plan.finish) + '</span>' +
       '</div>' +
       '<div class="mv-planbar-actions">' +
+      '<button class="mv-btn mv-btn--sm" data-act="fit-route">看路线</button>' +
       '<button class="mv-btn mv-btn--sm" data-act="open-plan">详情</button>' +
       '<button class="mv-btn mv-btn--primary" data-act="gen-plan">生成派车单</button>' +
       '</div></div>';
@@ -346,21 +348,21 @@
   }
 
   /* ── camera framing that respects the floating panels ───────────── */
-  function homeRect() {
+  function mapPadding() {
     const root = document.querySelector('.mv');
-    if (!root) return null;
+    if (!root) return { tl: [16, 70], br: [16, 100] };
     const W = root.clientWidth, H = root.clientHeight;
     const rr = root.getBoundingClientRect();
-    if (W < 900) return { l: 16, t: Math.min(210, H * 0.3), r: W - 16, b: H - Math.min(210, H * 0.3) };
+    if (W < 900) return { tl: [12, Math.min(230, H * 0.32)], br: [12, Math.min(250, H * 0.36)] };
     const side = document.querySelector('.mv-side');
-    const l = side ? side.getBoundingClientRect().right - rr.left + 22 : 24;
+    const l = side ? side.getBoundingClientRect().right - rr.left + 18 : 20;
     const inspector = document.getElementById('mvInspector');
-    const inspW = inspector && inspector.classList.contains('is-open') ? 348 : 24;
-    return { l, t: 70, r: W - inspW, b: H - 86 };
+    const open = inspector && inspector.classList.contains('is-open');
+    const r = open ? 366 : 56;
+    return { tl: [l, 74], br: [r, 104] };
   }
   function home(animate) {
-    const r = homeRect();
-    if (r && engine) engine.fitRect(r, animate);
+    if (engine) engine.fitUS(animate);
   }
 
   /* ── view ────────────────────────────────────────────────────────── */
@@ -402,10 +404,16 @@
         '</div>' +
         '<button class="mv-home" data-act="home" aria-label="全美视图">' +
         '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 11.2 12 4l8 7.2V20H4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button>' +
+        '<div class="mv-attrib">底图 © Esri · © OpenStreetMap</div>' +
         '<div class="mv-popover" id="mvPopover" hidden></div>' +
         '</div>';
 
       engine = A.MapEngine(document.getElementById('mvCanvas'), {
+        getPadding: mapPadding,
+        onTilesFail: function () {
+          A.toast('底图瓦片不可用，已切换到离线示意模式', 'amber');
+          document.getElementById('mvCanvas').classList.add('is-offline');
+        },
         onSelect: function (type, id) {
           if (type === 'order') {
             s.ui.mapSel = id;
@@ -437,9 +445,6 @@
           } else if (t.type === 'node') {
             const n = A.C.nodeById[t.id];
             if (n) A.tip.show('<b>' + n.id + '</b> ' + n.name + '<br>' + n.city + ' ' + n.zip, t.evt.clientX, t.evt.clientY);
-          } else if (t.type === 'port') {
-            const p = A.C.PORTS[t.id];
-            if (p) A.tip.show('<b>' + p.code + '</b> ' + p.name, t.evt.clientX, t.evt.clientY);
           }
         }
       });
@@ -460,6 +465,7 @@
       view = this;
       this._s = s;
       A._mapEngine = engine;   // handy for debugging / automated checks
+      engine.invalidate();
       home(false);
     },
 
@@ -469,7 +475,7 @@
 
       if (params && params.o) {
         const o = s.orders.find((x) => x.id === params.o);
-        if (o) { s.ui.mapSel = o.id; engine.focusOn(o.lng, o.lat, Math.max(3.2, engine.getZoom())); }
+        if (o) { s.ui.mapSel = o.id; engine.focusOn(o.lat, o.lng, 10); }
       }
 
       document.getElementById('mvList').innerHTML = renderList(s);
@@ -522,6 +528,9 @@
       A.store.emit();
     } else if (act === 'level') {
       s.ui.mapLevel = t.dataset.v; A.store.emit();
+    } else if (act === 'quick-add') {
+      e.stopPropagation();
+      addStop(id);
     } else if (act === 'add-stop') {
       addStop(id);
     } else if (act === 'remove-stop') {
@@ -529,7 +538,7 @@
       removeStop(id);
     } else if (act === 'focus') {
       const o = s.orders.find((x) => x.id === id);
-      if (o) engine.focusOn(o.lng, o.lat, Math.max(4.5, engine.getZoom()));
+      if (o) engine.focusOn(o.lat, o.lng, 11);
     } else if (act === 'close-insp') {
       s.ui.mapSel = null; A.store.emit();
     } else if (act === 'clear-plan') {
@@ -542,6 +551,8 @@
       genPlan();
     } else if (act === 'open-plan') {
       s.ui.mapSel = null; A.store.emit();
+    } else if (act === 'fit-route') {
+      engine.fitRoute();
     } else if (act === 'toggle-pop') {
       const pop = document.getElementById('mvPopover');
       pop.hidden = !pop.hidden;
