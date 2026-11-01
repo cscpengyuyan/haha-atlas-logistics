@@ -6,7 +6,7 @@
 (function (w) {
   'use strict';
   const A = w.A;
-  A.SEED_VERSION = 'atlas-1.0-r7';
+  A.SEED_VERSION = 'atlas-2.0-r1';
 
   /* ── 1. 型号 ──────────────────────────────────────────────────────── */
   const CM2IN = 0.393701;
@@ -555,7 +555,7 @@
   A.buildSeed = function () {
     return {
       today: TODAY,
-      theme: 'dark',
+      theme: 'light',
       orders: JSON.parse(JSON.stringify(orders)),
       ocean: JSON.parse(JSON.stringify(ocean)),
       exceptions: JSON.parse(JSON.stringify(exceptions)),
