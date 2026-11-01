@@ -1,13 +1,14 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark light">
-<meta name="theme-color" content="#070b12">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f6f9">
 <meta name="description" content="HAHA ATLAS · 美国大件设备物流指挥台：地图调度、海运在途看板、路径比价、异常与结算。演示数据，非生产系统。">
 <title>HAHA ATLAS · 美国大件物流指挥台</title>
 <link rel="icon" href="./assets/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./assets/vendor/leaflet.css">
 <link rel="stylesheet" href="./assets/css/app.css">
 <link rel="stylesheet" href="./assets/css/map-apple.css">
 </head>
@@ -91,7 +92,8 @@
   本指挥台需要启用 JavaScript。请在浏览器设置中允许脚本后刷新页面。
 </div></noscript>
 
-<script src="./assets/geo/geo.js"></script>
+<script src="./assets/vendor/leaflet.js"></script>
+<script src="./assets/geo/us-states.js"></script>
 <script src="./assets/js/core.js"></script>
 <script src="./assets/js/data.js"></script>
 <script src="./assets/js/charts.js"></script>
