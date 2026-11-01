@@ -1,18 +1,20 @@
 /* ==========================================================================
-   view-map.js — 地图调度：点位、筛选、派车计划与窗口可行性
+   view-map.js — 地图调度（macOS 地图式交互）
+   左侧毛玻璃结果列表 · 地图直接操作 · 右侧情境检视器 · 底部派车计划条
    ========================================================================== */
 (function (w) {
   'use strict';
   const A = w.A, fmt = A.fmt, dt = A.dt;
 
-  const STATUSES = ['待派', '待命', '已派', '执行中', '已签收', '异常'];
   const DRIVERS = ['M. Alvarez', 'J. Whitaker', 'R. Patel', 'D. Okafor', 'L. Nguyen', 'C. Ramirez'];
   const PLATES = ['TX-8842-KB', 'TX-2271-QD', 'CA-5510-MR', 'NJ-9930-TX', 'FL-4417-LP'];
 
   let engine = null;
   let view = null;
+  let inspKey = '';
+  let lastPlanKey = '';
 
-  /* ── helpers ─────────────────────────────────────────────────────── */
+  /* ── planning maths ──────────────────────────────────────────────── */
   function svcMinutes(o) {
     const base = o.level === 'L1' ? 18 : o.level === 'L2' ? 32 : 55;
     let m = base + (o.units - 1) * base * 0.45;
@@ -21,17 +23,13 @@
     return Math.round(m);
   }
   function driveMinutes(miles) {
-    // conservative first-pass: 52 mph average on interstate + 12 min per 180 miles for rest/scale
     return Math.round((miles / 52) * 60 + Math.floor(miles / 180) * 12);
   }
   function hhmm(min) {
     const m = Math.max(0, Math.round(min));
     return String(Math.floor(m / 60) % 24).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
   }
-  function toMin(hhmmStr) {
-    const [h, m] = String(hhmmStr).split(':').map(Number);
-    return h * 60 + (m || 0);
-  }
+  function toMin(s) { const [h, m] = String(s).split(':').map(Number); return h * 60 + (m || 0); }
 
   function planStops(originId, picks, strategy, state) {
     const origin = A.C.nodeById[originId];
@@ -51,8 +49,7 @@
       return seq;
     }
     return pts.slice().sort(function (a, b) {
-      const ka = a.window.date + ' ' + a.window.from, kb = b.window.date + ' ' + b.window.from;
-      return ka.localeCompare(kb);
+      return (a.window.date + a.window.from).localeCompare(b.window.date + b.window.from);
     });
   }
 
@@ -61,8 +58,7 @@
     if (!origin || !stopIds.length) return null;
     const seq = planStops(originId, stopIds, strategy, state);
     const legs = [];
-    let clock = 8 * 60;           // 仓口可放货时刻（演示：08:00）
-    let prev = origin, totalMiles = 0, totalDrive = 0, violations = 0, waitTotal = 0;
+    let clock = 8 * 60, prev = origin, totalMiles = 0, totalDrive = 0, violations = 0, waitTotal = 0;
 
     seq.forEach(function (o, i) {
       const miles = Math.round(A.geo.roadMiles(prev, o));
@@ -79,30 +75,25 @@
       legs.push({
         idx: i + 1, order: o, from: i === 0 ? origin : seq[i - 1], to: o,
         miles, drive, arrive, start, depart, wait, svc,
-        window: o.window, late, tight,
-        slack: wTo - (start + svc)
+        window: o.window, late, tight, slack: wTo - (start + svc)
       });
       totalMiles += miles; totalDrive += drive; waitTotal += wait;
-      clock = depart;
-      prev = o;
+      clock = depart; prev = o;
     });
 
-    /* cost model: shared fixed cost + per-stop first unit + same-zip add-on */
     const stops = [];
     legs.forEach(function (l) {
       const z = l.to.zip;
       let st = stops.find((s) => s.zip === z);
-      if (!st) stops.push(st = { zip: z, units: 0, orders: [], mileage: 0 });
+      if (!st) stops.push(st = { zip: z, units: 0, orders: [] });
       st.units += l.to.units;
       st.orders.push(l.to);
-      st.mileage += l.miles;
     });
     const FIXED = 38, OUT = A.C.RATE.outbound, STOPFEE = A.C.RATE.stop;
     let single = 0, combined = 0;
-    const lines = [];
     seq.forEach(function (o) {
       const q = A.pricing.quote(o, 'B');
-      single += q.total + FIXED + OUT * (o.units - 1); // each trip repeats the fixed dispatch cost
+      single += q.total + FIXED + OUT * (o.units - 1);
     });
     stops.forEach(function (st) {
       const first = st.orders[0];
@@ -110,12 +101,6 @@
       const e = A.pricing.extraPrice('B', first.level, first.l4);
       const tech = A.sum(st.orders, (o) => (o.l5 ? A.C.ADDONS.L5.fee * o.units : 0));
       st.cost = OUT * st.units + f + e * (st.units - 1) + STOPFEE + tech;
-      lines.push({
-        zip: st.zip, city: first.city, units: st.units,
-        first: f, extra: e, extraCount: st.units - 1, stop: STOPFEE,
-        out: OUT * st.units, tech, total: st.cost,
-        level: first.level, orders: st.orders
-      });
       combined += st.cost;
     });
     combined += FIXED;
@@ -128,257 +113,318 @@
     }, 0);
 
     return {
-      origin: originId, strategy, legs, lines,
-      miles: totalMiles, drive: totalDrive, wait: waitTotal,
-      finish: clock, violations,
-      single: Math.round(single), combined: Math.round(combined),
+      origin: originId, strategy, legs, stops,
+      miles: totalMiles, drive: totalDrive, wait: waitTotal, finish: clock,
+      violations, single: Math.round(single), combined: Math.round(combined),
       saved: Math.round(single - combined), sameZipSaved: Math.round(sameZipSaved),
-      stops: seq.map((o) => o.id),
-      units: A.sum(seq, (o) => o.units)
+      stopIds: seq.map((o) => o.id), units: A.sum(seq, (o) => o.units)
     };
   }
 
-  /* ── dock renderers ──────────────────────────────────────────────── */
-  function renderTabs(s, tab) {
-    const tabs = [['plan', '派车计划'], ['orders', '订单池'], ['nodes', '节点']];
-    return '<div class="dock-tabs">' + tabs.map(function (t) {
-      return '<button data-act="tab" data-tab="' + t[0] + '" aria-pressed="' + (tab === t[0]) + '">' + t[1] +
-        (t[0] === 'plan' && s.draft.stops.length ? ' <span class="tag tag--amber" style="height:15px;padding:0 4px;font-size:9px">' + s.draft.stops.length + '</span>' : '') + '</button>';
-    }).join('') + '</div>';
+  /* ── small builders ──────────────────────────────────────────────── */
+  function levelChip(level) {
+    const map = { L1: 'l1', L2: 'l2', L3: 'l3' };
+    return '<span class="mv-chip mv-chip--' + map[level] + '">' + level + '</span>';
   }
+  function statusDot(status) {
+    const map = { '待派': 'orange', '待命': 'purple', '已派': 'blue', '执行中': 'teal', '已签收': 'green', '异常': 'red' };
+    return '<i class="mv-dot mv-dot--' + (map[status] || 'gray') + '"></i>';
+  }
+  function winText(o) {
+    const d = dt.diff(A.app.state.today, o.window.date);
+    const day = d === 0 ? '今天' : d === 1 ? '明天' : d === -1 ? '昨天' : dt.mmdd(o.window.date);
+    return day + ' ' + o.window.from + '–' + o.window.to;
+  }
+  function money(v) { return '$' + fmt.n(v, 0); }
 
-  function renderPlanTab(s) {
-    const origin = A.C.nodeById[s.draft.origin];
-    const plan = s.draft.plan;
-    const candidates = s.orders.filter(function (o) {
-      return o.nodeId === s.draft.origin && (o.status === '待派' || o.status === '待命') && !s.draft.stops.includes(o.id);
-    }).sort(function (a, b) { return (a.window.date + a.window.from).localeCompare(b.window.date + b.window.from); });
-
-    let out = '';
-
-    /* origin */
-    out += '<div><div class="sec-t">起运仓<span class="sp"></span><span class="muted" style="text-transform:none;letter-spacing:0">' + (origin ? origin.city + ' ' + origin.zip : '') + '</span></div>' +
-      '<select class="select" data-act="origin" style="width:100%">' +
-      A.C.NODES.map(function (n) {
-        const kind = n.kind === 'inv' ? '库存仓' : '区域站';
-        return '<option value="' + n.id + '"' + (n.id === s.draft.origin ? ' selected' : '') + '>' + n.id + ' · ' + n.name + '（' + kind + '）</option>';
-      }).join('') + '</select></div>';
-
-    /* selected stops */
-    if (s.draft.stops.length) {
-      out += '<div><div class="sec-t">已选站点<span class="sp"></span><button class="btn btn--sm btn--ghost" data-act="clear-plan">清空</button></div>' +
-        '<div class="stack" style="gap:6px">' + s.draft.stops.map(function (id, i) {
-          const o = s.orders.find((x) => x.id === id);
-          if (!o) return '';
-          return '<div style="display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;background:var(--panel-2);border:1px solid var(--line-soft)">' +
-            '<b class="num" style="width:15px;height:15px;border-radius:4px;background:var(--amber);color:#221503;display:grid;place-items:center;font-size:9.5px">' + (i + 1) + '</b>' +
-            '<div style="flex:1;min-width:0"><div style="font-size:11.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + o.city + ' ' + o.zip + '</div>' +
-            '<div style="font-size:10px;color:var(--txt-3)">' + o.model + ' ×' + o.units + ' · ' + o.level + ' · ' + dt.mmdd(o.window.date) + ' ' + o.window.from + '</div></div>' +
-            '<button class="icon-btn" style="width:22px;height:22px" data-act="remove-stop" data-id="' + o.id + '" aria-label="移除">✕</button></div>';
-        }).join('') + '</div></div>';
-
-      /* strategy */
-      out += '<div class="row" style="gap:6px"><span class="muted" style="font-size:10.5px">站序</span>' +
-        '<div class="seg"><button data-act="strategy" data-v="window" aria-pressed="' + (s.draft.order === 'window') + '">按窗口</button>' +
-        '<button data-act="strategy" data-v="nearest" aria-pressed="' + (s.draft.order === 'nearest') + '">最近邻</button></div>' +
-        '<span class="sp"></span><span class="hint">最多 5 站</span></div>';
-    }
-
-    /* result */
-    if (plan) {
-      const bad = plan.violations > 0;
-      out += '<div class="card" style="background:var(--panel-2)"><div class="card-h" style="padding:9px 11px"><h3 style="font-size:11.5px">线路核算</h3><span class="sp"></span>' +
-        '<span class="tag ' + (bad ? 'tag--red' : 'tag--green') + '">' + (bad ? plan.violations + ' 站窗口冲突' : '窗口可行') + '</span></div>' +
-        '<div class="card-b card-b--tight">' +
-        '<div class="row" style="gap:14px;margin-bottom:9px">' +
-        numBlock(fmt.n(plan.miles) + ' mi', '总里程') +
-        numBlock(fmt.dur(plan.drive), '纯行驶') +
-        numBlock(fmt.dur(plan.wait), '窗口等待') +
-        numBlock(hhmm(plan.finish), '预计收车') +
-        '</div>' +
-        '<table class="tbl" style="font-size:11px"><thead><tr><th>#</th><th>到达</th><th>窗口</th><th class="r">里程</th><th>状态</th></tr></thead><tbody>' +
-        plan.legs.map(function (l) {
-          const st = l.late ? '<span class="tag tag--red">迟到</span>' : l.tight ? '<span class="tag tag--amber">超窗</span>' : l.wait > 0 ? '<span class="tag tag--plain">等窗</span>' : '<span class="tag tag--green">可签</span>';
-          return '<tr><td class="num">' + l.idx + '</td><td class="num">' + hhmm(l.arrive) + '</td>' +
-            '<td class="num muted">' + l.window.from + '–' + l.window.to + '</td>' +
-            '<td class="r num">' + l.miles + '</td><td>' + st + '</td></tr>';
-        }).join('') + '</tbody></table>' +
-        '<div class="divide"></div>' +
-        '<div class="kv" style="font-size:11px">' +
-        '<dt>分票直送合计</dt><dd>' + fmt.usd(plan.single) + '</dd>' +
-        '<dt>合车一趟合计</dt><dd style="color:var(--teal)">' + fmt.usd(plan.combined) + '</dd>' +
-        '<dt>其中同址加台省</dt><dd>' + fmt.usd(plan.sameZipSaved) + '</dd>' +
-        '<dt style="font-weight:650;color:var(--txt)">差额</dt><dd style="font-weight:700;color:' + (plan.saved > 0 ? 'var(--teal)' : 'var(--red)') + '">' + (plan.saved > 0 ? '+' : '') + fmt.usd(plan.saved) + '</dd>' +
-        '</div>' +
-        '<p class="hint" style="margin-top:8px">合车只在同址加台与共享车组固定成本上生成差额；跨址的逐站费照付，不能拿两辆专车价当基线。</p>' +
-        '</div></div>';
-      if (bad) {
-        out += '<div style="display:flex;gap:8px;padding:9px 10px;border-radius:8px;background:var(--red-soft);border:1px solid rgba(255,107,107,.28)">' +
-          '<span class="dot dot--red"></span><div style="font-size:11px;line-height:1.5">存在超窗站点：硬窗站点应拆线或改约；软窗须先取得客户书面同意，且不破原承诺。</div></div>';
+  /* ── left: result list ───────────────────────────────────────────── */
+  function visibleOrders(s) {
+    const q = (s.ui.mapQuery || '').trim().toLowerCase();
+    const lv = s.ui.mapLevel || 'ALL';
+    return s.orders.filter(function (o) {
+      if (lv !== 'ALL' && o.level !== lv) return false;
+      if (q) {
+        const hay = (o.id + ' ' + o.city + ' ' + o.st + ' ' + o.zip + ' ' + o.model).toLowerCase();
+        if (!hay.includes(q)) return false;
       }
-      out += '<button class="btn btn--prime" style="width:100%;height:34px" data-act="gen-plan">生成派车单 · ' + plan.stops.length + ' 站 ' + plan.units + ' 台</button>';
-    } else {
-      out += '<div class="empty"><b>还没有选站</b><span>从下方候选订单中点选，最多 5 站</span></div>';
-    }
-
-    /* candidates */
-    out += '<div><div class="sec-t">候选订单 <span class="sp"></span><span class="muted" style="text-transform:none;letter-spacing:0">' + candidates.length + ' 票</span></div>' +
-      '<div class="stack" style="gap:6px">' + (candidates.slice(0, 14).map(function (o) {
-        const late = dt.diff(s.today, o.window.date) < 0;
-        return '<button data-act="pick-order" data-id="' + o.id + '" style="display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;background:var(--panel-2);border:1px solid var(--line-soft);text-align:left;width:100%">' +
-          '<span style="width:15px;height:15px;border-radius:4px;border:1.5px dashed var(--line);display:grid;place-items:center;font-size:9px;color:var(--txt-3)">+</span>' +
-          '<div style="flex:1;min-width:0"><div style="font-size:11.5px;font-weight:560">' + o.city + ' <span class="muted">' + o.zip + '</span>' +
-          (o.hard ? ' <span class="tag tag--red" style="height:14px;padding:0 3px;font-size:8.5px">硬</span>' : '') + '</div>' +
-          '<div style="font-size:10px;color:' + (late ? 'var(--red)' : 'var(--txt-3)') + '">' + o.model + ' ×' + o.units + ' · ' + A.C.LEVELS[o.level].code + (o.l4 ? '+L4' : '') + ' · ' + dt.mmdd(o.window.date) + ' ' + o.window.from + '–' + o.window.to + '</div></div>' +
-          '<span class="num" style="font-size:10.5px;color:var(--txt-3)">' + o.miles + 'mi</span></button>';
-      }).join('') || '<div class="empty"><b>该仓没有待派订单</b><span>换一个起运仓或推进时钟</span></div>') + '</div></div>';
-
-    /* dispatched trucks */
-    const trucks = (s.trucks || []).filter((t) => t.origin === s.draft.origin);
-    if (trucks.length) {
-      out += '<div><div class="sec-t">本仓已排线 <span class="sp"></span><span class="muted" style="text-transform:none;letter-spacing:0">' + trucks.length + '</span></div>' +
-        trucks.map(function (t) {
-          return '<button data-act="load-truck" data-id="' + t.id + '" style="width:100%;text-align:left;padding:8px 9px;border-radius:7px;background:var(--panel-2);border:1px solid var(--line-soft);margin-bottom:5px">' +
-            '<div style="display:flex;align-items:center;gap:7px"><b class="mono" style="font-size:10.5px">' + t.id + '</b><span class="sp"></span><span class="tag tag--teal">' + t.stops.length + ' 站</span></div>' +
-            '<div style="font-size:10.5px;color:var(--txt-3);margin-top:2px">' + t.driver + ' · ' + t.plate + ' · 08:00 发车 · ' + fmt.n(t.miles) + ' mi</div></button>';
-        }).join('') + '</div>';
-    }
-    return out;
-  }
-
-  function renderOrdersTab(s, selId) {
-    const list = s.orders.slice().sort(function (a, b) {
-      const rank = { 异常: 0, 待派: 1, 待命: 2, 执行中: 3, 已派: 4, 已签收: 5 };
-      return (rank[a.status] - rank[b.status]) || (a.window.date + a.window.from).localeCompare(b.window.date + b.window.from);
+      return true;
+    }).sort(function (a, b) {
+      const ra = { 异常: 0, 待派: 1, 待命: 2, 执行中: 3, 已派: 4, 已签收: 5 };
+      return (ra[a.status] - ra[b.status]) || (a.window.date + a.window.from).localeCompare(b.window.date + b.window.from);
     });
-    return '<div class="row" style="gap:6px"><div class="search" style="flex:1"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>' +
-      '<input class="input" id="mapOrderSearch" placeholder="搜单号 / 城市 / ZIP"></div></div>' +
-      '<div class="stack" style="gap:5px" id="mapOrderList">' + list.map(function (o) {
-        const sel = o.id === selId;
-        return '<button data-act="sel-order" data-id="' + o.id + '" style="display:grid;grid-template-columns:1fr auto;gap:8px;padding:7px 9px;border-radius:7px;background:' + (sel ? 'var(--amber-soft)' : 'var(--panel-2)') + ';border:1px solid ' + (sel ? 'rgba(245,165,36,.4)' : 'var(--line-soft)') + ';text-align:left;width:100%">' +
-          '<div style="min-width:0"><div style="font-size:11.5px;font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + o.city + ' <span class="muted">' + o.st + ' ' + o.zip + '</span></div>' +
-          '<div style="font-size:10px;color:var(--txt-3)">' + o.id + ' · ' + o.model + '×' + o.units + ' · ' + A.C.LEVELS[o.level].code + '</div></div>' +
-          '<span class="tag tag--' + statusTone(o.status) + '" style="align-self:center">' + o.status + '</span></button>';
-      }).join('') + '</div>';
   }
 
-  function renderNodesTab(s) {
-    return '<div class="stack" style="gap:8px">' + A.C.NODES.map(function (n) {
-      const list = s.orders.filter((o) => o.nodeId === n.id);
-      const open = list.filter((o) => o.status === '待派' || o.status === '待命').length;
-      const inv = A.sum(list.filter((o) => o.status !== '已签收'), (o) => o.units);
-      return '<div class="card" style="background:var(--panel-2)"><div class="card-b card-b--tight">' +
-        '<div style="display:flex;align-items:center;gap:7px"><b style="font-size:12px">' + n.id + '</b>' +
-        '<span class="tag ' + (n.kind === 'inv' ? 'tag--amber' : 'tag--violet') + '">' + (n.kind === 'inv' ? '库存仓' : '区域站') + '</span>' +
-        '<span class="sp"></span><span class="muted" style="font-size:10px">' + n.city + ' ' + n.zip + '</span></div>' +
-        '<div style="font-size:10.5px;color:var(--txt-3);margin-top:4px">' + n.caps.join(' · ') + '</div>' +
-        '<div class="row" style="gap:12px;margin-top:7px">' +
-        numBlock(list.length, '票') + numBlock(open, '待派') + numBlock(inv, '台') +
-        numBlock(n.kind === 'inv' ? '自有' : 'LXD / LongRoad', '承接') +
-        '</div></div></div>';
-    }).join('') + '</div>';
+  function renderList(s) {
+    const list = visibleOrders(s);
+    if (!list.length) {
+      return '<div class="mv-empty"><b>没有匹配的订单</b><span>试试清空搜索或切换服务档</span></div>';
+    }
+    const groups = [
+      { key: 'today', name: '今天到期', items: list.filter((o) => o.window.date === s.today) },
+      { key: 'tomorrow', name: '明天', items: list.filter((o) => dt.diff(s.today, o.window.date) === 1) },
+      { key: 'later', name: '之后', items: list.filter((o) => dt.diff(s.today, o.window.date) > 1) },
+      { key: 'past', name: '已过期 / 无需派车', items: list.filter((o) => dt.diff(s.today, o.window.date) < 0) }
+    ];
+    const selId = s.ui.mapSel;
+    return groups.filter((g) => g.items.length).map(function (g) {
+      return '<div class="mv-group"><div class="mv-group-h">' + g.name + '<span>' + g.items.length + '</span></div>' +
+        g.items.slice(0, 40).map(function (o) {
+          const q = A.pricing.quote(o, 'B');
+          const inPlan = s.draft.stops.includes(o.id);
+          return '<button class="mv-row' + (o.id === selId ? ' is-sel' : '') + (inPlan ? ' is-in' : '') + '" data-act="pick" data-id="' + o.id + '">' +
+            '<span class="mv-row-dot">' + statusDot(o.status) + '</span>' +
+            '<span class="mv-row-main">' +
+            '<span class="mv-row-t">' + o.city + '<i>' + o.st + ' ' + o.zip + '</i></span>' +
+            '<span class="mv-row-s">' + o.model + ' ×' + o.units + ' · ' + o.level + (o.l4 ? '+L4' : '') + ' · ' + winText(o) + '</span>' +
+            '</span>' +
+            '<span class="mv-row-end">' + (inPlan ? '<span class="mv-inplan">已选</span>' : '<b>' + money(q ? q.total : 0) + '</b>') +
+            '<svg class="mv-chev" viewBox="0 0 24 24" width="12" height="12"><path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
+            '</button>';
+        }).join('') + '</div>';
+    }).join('');
   }
 
-  function statusTone(st) {
-    return st === '异常' ? 'red' : st === '已签收' ? 'green' : st === '执行中' ? 'teal' : st === '已派' ? 'blue' : st === '待命' ? 'violet' : 'amber';
-  }
-  function numBlock(v, k) {
-    return '<div style="line-height:1.2"><div class="num" style="font-size:14px;font-weight:700">' + v + '</div><div style="font-size:9.5px;color:var(--txt-3)">' + k + '</div></div>';
+  /* ── right: contextual inspector ─────────────────────────────────── */
+  function renderInspector(s) {
+    const o = s.ui.mapSel ? s.orders.find((x) => x.id === s.ui.mapSel) : null;
+    const plan = s.draft.plan;
+    const mode = o ? 'order' : plan ? 'plan' : 'empty';
+    const key = mode + ':' + (o ? o.id + ':' + (plan ? plan.stops.length : 0) : plan ? plan.stopIds.join(',') : '');
+    const fresh = key !== inspKey;
+    inspKey = key;
+
+    let inner = '';
+    if (mode === 'empty') {
+      inner = '<div class="mv-insp-empty">' +
+        '<svg viewBox="0 0 48 48" width="34" height="34"><path d="M24 8c-6.6 0-12 5.2-12 11.6C12 28 24 40 24 40s12-12 12-20.4C36 13.2 30.6 8 24 8Z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="24" cy="19" r="4" fill="currentColor" opacity=".5"/></svg>' +
+        '<b>选择一个订单</b><span>在左侧列表或地图上轻点订单，查看服务档、窗口与三种路径的比价。</span></div>';
+    } else if (mode === 'order') {
+      const qA = A.pricing.quote(o, 'A'), qB = A.pricing.quote(o, 'B');
+      const qC1 = A.pricing.quote(o, 'C1'), qC2 = A.pricing.quote(o, 'C2');
+      const inPlan = s.draft.stops.includes(o.id);
+      const node = A.C.nodeById[o.nodeId];
+      const best = [qA, qB, qC1, qC2].filter((q) => q && q.feasibility !== 'blocked').sort((a, b) => a.total - b.total)[0];
+      inner =
+        '<div class="mv-insp-h">' +
+        '<div class="mv-insp-title"><h2>' + o.city + '</h2><p>' + o.st + ' ' + o.zip + ' · 起运 ' + node.id + '</p></div>' +
+        '<button class="mv-round" data-act="close-insp" aria-label="关闭">' +
+        '<svg viewBox="0 0 24 24" width="13" height="13"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>' +
+        '</div>' +
+        '<div class="mv-insp-body">' +
+        '<div class="mv-tags">' +
+        '<span class="mv-chip">' + o.model + ' ×' + o.units + '</span>' +
+        levelChip(o.level) +
+        (o.l4 ? '<span class="mv-chip mv-chip--l4">L4</span>' : '') +
+        (o.l5 ? '<span class="mv-chip mv-chip--l5">L5</span>' : '') +
+        '<span class="mv-chip mv-chip--state">' + statusDot(o.status) + o.status + '</span>' +
+        '</div>' +
+        '<div class="mv-rows">' +
+        kv('交付窗口', winText(o) + (o.hard ? ' · 硬窗' : '')) +
+        kv('距起运仓', fmt.n(o.miles) + ' mi') +
+        kv('作业时长', svcMinutes(o) + ' 分钟') +
+        kv('序列号', o.sns.join(' · ')) +
+        '</div>' +
+        '<div class="mv-sec"><div class="mv-sec-h">同范围全价</div>' +
+        '<div class="mv-prices">' +
+        priceCell('A', '卡派 / 自提', qA, best && best.path === 'A') +
+        priceCell('B', '直提直送', qB, best && best.path === 'B') +
+        priceCell('C1', '经站统包', qC1, best && best.path === 'C1') +
+        priceCell('C2', '经站分采', qC2, best && best.path === 'C2') +
+        '</div></div>' +
+        (qA && qA.feasibility === 'blocked' ? '<p class="mv-note">' + qA.blocker + '</p>' : '') +
+        '</div>' +
+        '<div class="mv-insp-f">' +
+        '<button class="mv-btn" data-act="focus" data-id="' + o.id + '">定位</button>' +
+        (inPlan
+          ? '<button class="mv-btn mv-btn--warn" data-act="remove-stop" data-id="' + o.id + '">移出计划</button>'
+          : '<button class="mv-btn mv-btn--primary" data-act="add-stop" data-id="' + o.id + '">加入派车计划</button>') +
+        '</div>';
+    } else {
+      const bad = plan.violations > 0;
+      inner =
+        '<div class="mv-insp-h">' +
+        '<div class="mv-insp-title"><h2>派车计划</h2><p>' + plan.stops.length + ' 站 · ' + plan.units + ' 台 · 起运 ' + plan.origin + '</p></div>' +
+        '<button class="mv-round" data-act="clear-plan" aria-label="清空">' +
+        '<svg viewBox="0 0 24 24" width="13" height="13"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>' +
+        '</div>' +
+        '<div class="mv-insp-body">' +
+        '<div class="mv-bignums">' +
+        bigNum(fmt.n(plan.miles), 'mi', '总里程') +
+        bigNum(fmt.dur(plan.drive), '', '纯行驶') +
+        bigNum(hhmm(plan.finish), '', '预计收车') +
+        '</div>' +
+        '<div class="mv-sec"><div class="mv-sec-h">站序与到场时间</div>' +
+        '<div class="mv-legs">' + plan.legs.map(function (l) {
+          const st = l.late ? '<span class="mv-pill mv-pill--red">迟到</span>' : l.tight ? '<span class="mv-pill mv-pill--orange">超窗</span>' : l.wait > 0 ? '<span class="mv-pill">等窗</span>' : '<span class="mv-pill mv-pill--green">可签</span>';
+          return '<div class="mv-leg">' +
+            '<span class="mv-leg-n">' + l.idx + '</span>' +
+            '<span class="mv-leg-main"><b>' + l.to.city + '</b><i>' + l.to.zip + ' · ' + l.to.model + '×' + l.to.units + '</i></span>' +
+            '<span class="mv-leg-time">' + hhmm(l.start) + '</span>' + st + '</div>';
+        }).join('') + '</div></div>' +
+        '<div class="mv-sec"><div class="mv-sec-h">成本</div>' +
+        '<div class="mv-rows">' +
+        kv('分票直送合计', money(plan.single)) +
+        kv('合车一趟合计', money(plan.combined)) +
+        kv('同址加台节省', money(plan.sameZipSaved)) +
+        '</div>' +
+        '<div class="mv-save ' + (plan.saved > 0 ? 'is-up' : 'is-down') + '">' +
+        '<span>差额</span><b>' + (plan.saved > 0 ? '+' : '') + money(plan.saved) + '</b></div>' +
+        '<p class="mv-note">合车只在同址加台与共享车组固定成本上生成差额；跨址的逐站费照付。</p>' +
+        '</div>' +
+        (bad ? '<div class="mv-warnbox">' + plan.violations + ' 个站点存在窗口冲突，硬窗站点应拆线或改约。</div>' : '') +
+        '</div>' +
+        '<div class="mv-insp-f">' +
+        '<button class="mv-btn" data-act="toggle-strategy">' + (plan.strategy === 'window' ? '按窗口排线' : '按最近邻排线') + '</button>' +
+        '<button class="mv-btn mv-btn--primary" data-act="gen-plan">生成派车单</button>' +
+        '</div>';
+    }
+
+    return '<div class="mv-inspector-inner' + (fresh ? ' is-fresh' : '') + '">' + inner + '</div>';
   }
 
-  /* floating selection card */
-  function renderSelCard(s) {
-    const sel = s.ui.sel;
-    if (!sel || sel.type !== 'order') return '';
-    const o = s.orders.find((x) => x.id === sel.id);
-    if (!o) return '';
-    const node = A.C.nodeById[o.nodeId];
-    const qB = A.pricing.quote(o, 'B');
-    const qC = A.pricing.quote(o, 'C2');
-    const qA = A.pricing.quote(o, 'A');
-    const inPlan = s.draft.stops.includes(o.id);
-    return '<div class="map-panel" style="position:absolute;left:12px;top:58px;width:268px;padding:11px 12px;display:grid;gap:9px">' +
-      '<div style="display:flex;align-items:flex-start;gap:8px">' +
-      '<div><div class="mono" style="font-size:10px;color:var(--txt-3)">' + o.id + '</div>' +
-      '<div style="font-size:13px;font-weight:680;line-height:1.25;margin-top:1px">' + o.city + ' ' + o.st + ' ' + o.zip + '</div>' +
-      '<div style="font-size:10.5px;color:var(--txt-3)">起运 ' + node.id + ' · ' + fmt.n(o.miles) + ' mi</div></div>' +
-      '<span class="sp"></span><button class="icon-btn" style="width:22px;height:22px" data-act="close-sel">✕</button></div>' +
-      '<div class="row row--tight">' +
-      '<span class="tag tag--plain">' + o.model + ' ×' + o.units + '</span>' +
-      '<span class="tag tag--amber">' + A.C.LEVELS[o.level].code + ' ' + A.C.LEVELS[o.level].short + '</span>' +
-      (o.l4 ? '<span class="tag tag--violet">L4</span>' : '') + (o.l5 ? '<span class="tag tag--teal">L5</span>' : '') +
-      '<span class="tag tag--' + statusTone(o.status) + '">' + o.status + '</span></div>' +
-      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:5px;font-size:10.5px">' +
-      priceCell('A', qA) + priceCell('B', qB) + priceCell('C2', qC) + '</div>' +
-      '<div style="font-size:10.5px;color:var(--txt-3)">窗口 ' + dt.mmdd(o.window.date) + ' ' + o.window.from + '–' + o.window.to + (o.hard ? ' · <b style="color:var(--red)">硬窗</b>' : ' · 软窗') + ' · 作业 ' + svcMinutes(o) + ' 分</div>' +
-      '<div class="row" style="gap:6px">' +
-      (inPlan ? '<button class="btn btn--sm" style="flex:1" data-act="remove-stop" data-id="' + o.id + '">移出计划</button>'
-        : '<button class="btn btn--prime btn--sm" style="flex:1" data-act="add-stop" data-id="' + o.id + '">加入派车计划</button>') +
-      '<button class="btn btn--sm btn--ghost" data-act="focus" data-id="' + o.id + '">放大</button></div></div>';
+  function kv(k, v) { return '<div class="mv-kv"><span>' + k + '</span><b>' + v + '</b></div>'; }
+  function bigNum(v, unit, label) {
+    return '<div class="mv-bignum"><b>' + v + (unit ? '<i>' + unit + '</i>' : '') + '</b><span>' + label + '</span></div>';
   }
-  function priceCell(p, q) {
-    return '<div style="padding:5px 6px;border-radius:6px;background:var(--panel-2);border:1px solid var(--line-soft)' + (q && q.feasibility === 'blocked' ? ';opacity:.6' : '') + '">' +
-      '<div style="font-size:9.5px;color:var(--txt-3)">' + p + '</div><div class="num" style="font-weight:650">' + (q ? fmt.usd(q.total) : '—') + '</div></div>';
+  function priceCell(code, name, q, best) {
+    const blocked = !q || q.feasibility === 'blocked';
+    return '<div class="mv-price' + (blocked ? ' is-blocked' : '') + (best ? ' is-best' : '') + '">' +
+      '<span class="mv-price-code">' + code + '</span>' +
+      '<span class="mv-price-name">' + name + '</span>' +
+      '<b>' + (blocked ? '不可行' : money(q.total)) + '</b>' +
+      (best ? '<i class="mv-price-best">最优</i>' : '') +
+      '</div>';
+  }
+
+  /* ── bottom: plan bar ────────────────────────────────────────────── */
+  function renderPlanBar(s) {
+    const plan = s.draft.plan;
+    if (!plan) return '';
+    return '<div class="mv-planbar-in">' +
+      '<div class="mv-stops">' + plan.legs.map(function (l, i) {
+        return '<button class="mv-stop" data-act="pick" data-id="' + l.to.id + '" style="animation-delay:' + (i * 40) + 'ms">' +
+          '<span class="mv-stop-n">' + (i + 1) + '</span>' +
+          '<span class="mv-stop-t">' + l.to.city + '<i>' + hhmm(l.start) + '</i></span>' +
+          '<span class="mv-stop-x" data-act="remove-stop" data-id="' + l.to.id + '">' +
+          '<svg viewBox="0 0 24 24" width="10" height="10"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg></span>' +
+          '</button>';
+      }).join('') + (plan.stops.length < 5 ? '<span class="mv-stop-add">再选最多 ' + (5 - plan.stops.length) + ' 站</span>' : '') + '</div>' +
+      '<div class="mv-planbar-mid">' +
+      '<b>' + money(plan.combined) + '</b>' +
+      '<span>' + fmt.n(plan.miles) + ' mi · ' + fmt.dur(plan.drive) + ' · 收车 ' + hhmm(plan.finish) + '</span>' +
+      '</div>' +
+      '<div class="mv-planbar-actions">' +
+      '<button class="mv-btn mv-btn--sm" data-act="open-plan">详情</button>' +
+      '<button class="mv-btn mv-btn--primary" data-act="gen-plan">生成派车单</button>' +
+      '</div></div>';
+  }
+
+  /* ── layers popover ──────────────────────────────────────────────── */
+  function renderPopover(s) {
+    const lz = s.ui.mapLayers || {};
+    const rows = [
+      ['lanes', '海运航线'],
+      ['zones', '150 mi 覆盖圈'],
+      ['pins', '订单点位'],
+      ['roads', '路网'],
+      ['nodes', '仓库与区域站']
+    ];
+    return '<div class="mv-pop-h">图层</div>' +
+      rows.map(function (r) {
+        return '<button class="mv-pop-row" data-act="layer" data-v="' + r[0] + '">' +
+          '<span>' + r[1] + '</span>' +
+          '<i class="mv-switch' + (lz[r[0]] !== false ? ' is-on' : '') + '"></i></button>';
+      }).join('') +
+      '<div class="mv-pop-div"></div>' +
+      '<button class="mv-pop-row" data-act="color" data-v="status"><span>按状态着色</span><i class="mv-check' + (s.ui.mapColor !== 'level' ? ' is-on' : '') + '"></i></button>' +
+      '<button class="mv-pop-row" data-act="color" data-v="level"><span>按服务档着色</span><i class="mv-check' + (s.ui.mapColor === 'level' ? ' is-on' : '') + '"></i></button>' +
+      '<div class="mv-pop-div"></div>' +
+      '<div class="mv-pop-legend">' +
+      '<span><i class="mv-dot mv-dot--orange"></i>待派</span><span><i class="mv-dot mv-dot--blue"></i>已派</span>' +
+      '<span><i class="mv-dot mv-dot--green"></i>已签收</span><span><i class="mv-dot mv-dot--red"></i>异常</span>' +
+      '</div>';
+  }
+
+  /* ── camera framing that respects the floating panels ───────────── */
+  function homeRect() {
+    const root = document.querySelector('.mv');
+    if (!root) return null;
+    const W = root.clientWidth, H = root.clientHeight;
+    const rr = root.getBoundingClientRect();
+    if (W < 900) return { l: 16, t: Math.min(210, H * 0.3), r: W - 16, b: H - Math.min(210, H * 0.3) };
+    const side = document.querySelector('.mv-side');
+    const l = side ? side.getBoundingClientRect().right - rr.left + 22 : 24;
+    const inspector = document.getElementById('mvInspector');
+    const inspW = inspector && inspector.classList.contains('is-open') ? 348 : 24;
+    return { l, t: 70, r: W - inspW, b: H - 86 };
+  }
+  function home(animate) {
+    const r = homeRect();
+    if (r && engine) engine.fitRect(r, animate);
   }
 
   /* ── view ────────────────────────────────────────────────────────── */
   A.registerView('map', {
     title: '地图调度',
-    sub: '点位、站序与窗口可行性 · 点击订单加入派车计划',
-    flush: true,
+    sub: '轻点订单加入计划 · 拖动平移 · 双指或滚轮缩放',
 
     mount: function (host, s) {
-      host.innerHTML =
-        '<div class="map-shell">' +
-        '<div class="map-stage" id="mapStage">' +
-        '<div id="mapSvgHost" style="position:absolute;inset:0"></div>' +
-        '<div id="mapSel"></div>' +
-        '<div class="map-top">' +
-        '<div class="map-panel map-filters">' +
-        '<div class="seg" id="mapLevelSeg">' +
-        '<button data-act="level" data-v="ALL" aria-pressed="' + (s.ui.mapLevel === 'ALL') + '">全部</button>' +
-        '<button data-act="level" data-v="L1" aria-pressed="' + (s.ui.mapLevel === 'L1') + '">L1</button>' +
-        '<button data-act="level" data-v="L2" aria-pressed="' + (s.ui.mapLevel === 'L2') + '">L2</button>' +
-        '<button data-act="level" data-v="L3" aria-pressed="' + (s.ui.mapLevel === 'L3') + '">L3</button>' +
-        '</div>' +
-        '<div class="seg" id="mapColorSeg">' +
-        '<button data-act="color" data-v="status" aria-pressed="' + (s.ui.mapColor !== 'level') + '">按状态</button>' +
-        '<button data-act="color" data-v="level" aria-pressed="' + (s.ui.mapColor === 'level') + '">按服务档</button>' +
-        '</div>' +
-        '<span style="width:1px;height:20px;background:var(--line)"></span>' +
-        '<button class="pill' + (s.ui.mapLayers.lanes !== false ? ' is-on' : '') + '" data-act="layer" data-v="lanes">海运航线</button>' +
-        '<button class="pill' + (s.ui.mapLayers.zones ? ' is-on' : '') + '" data-act="layer" data-v="zones">150 mi 圈</button>' +
-        '<button class="pill' + (s.ui.mapLayers.pins !== false ? ' is-on' : '') + '" data-act="layer" data-v="pins">订单点</button>' +
-        '<button class="pill' + (s.ui.mapLayers.roads !== false ? ' is-on' : '') + '" data-act="layer" data-v="roads">路网</button>' +
-        '</div></div>' +
-        '<div class="map-legend map-panel" id="mapLegend"></div>' +
-        '<div class="map-zoom map-panel">' +
-        '<button data-act="zoom" data-v="in" aria-label="放大">+</button>' +
-        '<button data-act="zoom" data-v="out" aria-label="缩小">−</button>' +
-        '<button data-act="zoom" data-v="fit" aria-label="复位" style="font-size:11px">⤢</button>' +
-        '</div>' +
-        '<div class="map-hint">滚轮缩放 · 拖动平移 · 双击放大 · 点击点位看详情</div>' +
-        '</div>' +
-        '<div class="dock" id="mapDock">' +
-        '<div class="dock-h"><h2>调度台</h2><span class="sp"></span><span class="hint" id="dockCount"></span></div>' +
-        '<div id="dockTabs"></div><div class="dock-b" id="dockBody"></div><div class="dock-f" id="dockFoot"></div>' +
-        '</div></div>';
+      s.ui.mapLevel = s.ui.mapLevel || 'ALL';
+      s.ui.mapLayers = s.ui.mapLayers || { lanes: true, zones: false, pins: true, roads: true, nodes: true };
 
-      engine = A.MapEngine(document.getElementById('mapSvgHost'), {
+      host.innerHTML =
+        '<div class="mv">' +
+        '<div class="mv-canvas" id="mvCanvas"></div>' +
+        '<div class="mv-topglass">' +
+        '<div class="mv-seg" id="mvSeg">' +
+        ['ALL', 'L1', 'L2', 'L3'].map(function (k) {
+          return '<button data-act="level" data-v="' + k + '"' + (s.ui.mapLevel === k ? ' class="is-on"' : '') + '>' + (k === 'ALL' ? '全部' : k) + '</button>';
+        }).join('') + '</div>' +
+        '<button class="mv-ctl" data-act="toggle-pop" id="mvPopBtn">' +
+        '<svg viewBox="0 0 24 24" width="14" height="14"><path d="M12 3 3 8l9 5 9-5-9-5ZM3 13l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>图层</button>' +
+        '</div>' +
+        '<aside class="mv-side" id="mvSide">' +
+        '<div class="mv-side-h">' +
+        '<div class="mv-search">' +
+        '<svg viewBox="0 0 24 24" width="14" height="14"><circle cx="11" cy="11" r="6.4" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>' +
+        '<input id="mvSearch" placeholder="搜索订单、城市或 ZIP" autocomplete="off">' +
+        '</div>' +
+        '</div>' +
+        '<div class="mv-list" id="mvList"></div>' +
+        '<div class="mv-side-f" id="mvSideF"></div>' +
+        '</aside>' +
+        '<aside class="mv-inspector" id="mvInspector" aria-live="polite"></aside>' +
+        '<div class="mv-planbar" id="mvPlanBar"></div>' +
+        '<div class="mv-zoom">' +
+        '<button data-act="zoom-in" aria-label="放大"><svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>' +
+        '<span class="mv-zoom-div"></span>' +
+        '<button data-act="zoom-out" aria-label="缩小"><svg viewBox="0 0 24 24" width="15" height="15"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>' +
+        '</div>' +
+        '<button class="mv-home" data-act="home" aria-label="全美视图">' +
+        '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 11.2 12 4l8 7.2V20H4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button>' +
+        '<div class="mv-popover" id="mvPopover" hidden></div>' +
+        '</div>';
+
+      engine = A.MapEngine(document.getElementById('mvCanvas'), {
         onSelect: function (type, id) {
           if (type === 'order') {
-            s.ui.sel = { type: 'order', id: id };
-            s.ui.dockTab = 'orders';
+            s.ui.mapSel = id;
             A.store.emit();
           } else if (type === 'node') {
-            s.draft.origin = id;
-            s.draft.plan = s.draft.stops.length ? buildPlan(s, s.draft.origin, s.draft.stops, s.draft.order) : null;
-            A.store.emit();
-            A.toast('起运仓切换为 ' + id, 'teal');
+            if (s.draft.origin !== id) {
+              s.draft.origin = id;
+              s.draft.stops = s.draft.stops.filter(function (oid) {
+                const o = s.orders.find((x) => x.id === oid);
+                return o && o.nodeId === id;
+              });
+              s.draft.plan = s.draft.stops.length ? buildPlan(s, id, s.draft.stops, s.draft.order) : null;
+              A.store.emit();
+              A.toast('起运仓切换为 ' + id, 'teal');
+            }
           } else if (type === 'port') {
             A.router.go('ocean', { port: id });
           } else {
-            s.ui.sel = null;
+            s.ui.mapSel = null;
             A.store.emit();
           }
         },
@@ -386,154 +432,131 @@
           if (!t) { A.tip.hide(); return; }
           if (t.type === 'order') {
             const o = s.orders.find((x) => x.id === t.id);
-            if (o) A.tip.show('<b>' + o.city + ' ' + o.zip + '</b><br>' + o.model + ' ×' + o.units + ' · ' + A.C.LEVELS[o.level].code +
-              '<br>' + o.status + ' · ' + dt.mmdd(o.window.date) + ' ' + o.window.from, t.evt.clientX, t.evt.clientY);
+            if (o) A.tip.show('<b>' + o.city + ' ' + o.st + '</b><br>' + o.model + ' ×' + o.units + ' · ' + o.level +
+              '<br>' + o.status + ' · ' + winText(o), t.evt.clientX, t.evt.clientY);
           } else if (t.type === 'node') {
             const n = A.C.nodeById[t.id];
-            if (n) A.tip.show('<b>' + n.id + ' ' + n.name + '</b><br>' + n.city + ' ' + n.zip + '<br>' + n.caps.join(' · '), t.evt.clientX, t.evt.clientY);
+            if (n) A.tip.show('<b>' + n.id + '</b> ' + n.name + '<br>' + n.city + ' ' + n.zip, t.evt.clientX, t.evt.clientY);
           } else if (t.type === 'port') {
             const p = A.C.PORTS[t.id];
-            if (p) A.tip.show('<b>' + p.code + ' ' + p.name + '</b><br>' + p.en, t.evt.clientX, t.evt.clientY);
+            if (p) A.tip.show('<b>' + p.code + '</b> ' + p.name, t.evt.clientX, t.evt.clientY);
           }
         }
       });
 
-      const dock = document.getElementById('mapDock');
-      dock.addEventListener('click', onDockClick);
-      dock.addEventListener('change', onDockChange);
-      host.addEventListener('click', function (e) {
-        const t = e.target.closest('[data-act]');
-        if (t) onStageClick(e, t);
+      const root = host.querySelector('.mv');
+      root.addEventListener('click', onClick);
+      root.addEventListener('input', function (e) {
+        if (e.target.id === 'mvSearch') {
+          s.ui.mapQuery = e.target.value;
+          document.getElementById('mvList').innerHTML = renderList(s);
+          document.getElementById('mvSideF').textContent = visibleOrders(s).length + ' 个结果';
+        }
       });
-      document.getElementById('dockBody').addEventListener('input', function (e) {
-        if (e.target.id === 'mapOrderSearch') filterOrderList(e.target.value);
+      document.addEventListener('keydown', function esc(e) {
+        if (e.key === 'Escape' && s.ui.mapSel) { s.ui.mapSel = null; A.store.emit(); }
       });
 
       view = this;
       this._s = s;
+      A._mapEngine = engine;   // handy for debugging / automated checks
+      home(false);
     },
 
     update: function (s, params) {
       if (!engine) return;
       this._s = s;
+
       if (params && params.o) {
         const o = s.orders.find((x) => x.id === params.o);
-        if (o) { s.ui.sel = { type: 'order', id: o.id }; s.ui.dockTab = 'orders'; engine.focusOn(o.lng, o.lat, 4.2); }
+        if (o) { s.ui.mapSel = o.id; engine.focusOn(o.lng, o.lat, Math.max(3.2, engine.getZoom())); }
       }
 
-      const tab = s.ui.dockTab || 'plan';
-      document.getElementById('dockTabs').innerHTML = renderTabs(s, tab);
-      const body = document.getElementById('dockBody');
-      const scrollTop = body.scrollTop;
-      body.innerHTML = tab === 'plan' ? renderPlanTab(s) : tab === 'orders' ? renderOrdersTab(s, s.ui.sel && s.ui.sel.id) : renderNodesTab(s);
-      body.scrollTop = scrollTop;
+      document.getElementById('mvList').innerHTML = renderList(s);
+      document.getElementById('mvSideF').textContent = visibleOrders(s).length + ' 个结果';
+      const searchEl = document.getElementById('mvSearch');
+      if (searchEl && searchEl.value !== (s.ui.mapQuery || '')) searchEl.value = s.ui.mapQuery || '';
 
-      const open = s.orders.filter((o) => o.status === '待派' || o.status === '待命').length;
-      document.getElementById('dockCount').textContent = '待派 ' + open + ' · 在途 ' + s.orders.filter((o) => o.status === '已派' || o.status === '执行中').length;
-      document.getElementById('dockFoot').innerHTML =
-        '<button class="btn btn--sm btn--ghost" style="flex:1" data-act="zoom" data-v="fit">全美视图</button>' +
-        '<button class="btn btn--sm" style="flex:1" data-act="focus-origin">定位起运仓</button>';
+      const insp = document.getElementById('mvInspector');
+      insp.innerHTML = renderInspector(s);
+      insp.classList.toggle('is-open', !!(s.ui.mapSel || s.draft.plan));
 
-      document.getElementById('mapSel').innerHTML = renderSelCard(s);
+      const bar = document.getElementById('mvPlanBar');
+      const planKey = s.draft.plan ? s.draft.plan.stopIds.join(',') : '';
+      bar.innerHTML = renderPlanBar(s);
+      bar.classList.toggle('is-open', !!s.draft.plan);
+      lastPlanKey = planKey;
 
-      /* legend */
-      const byLevel = s.ui.mapColor === 'level';
-      const items = byLevel
-        ? [['var(--blue)', 'L1 基础交接'], ['var(--teal)', 'L2 入口交付'], ['var(--amber)', 'L3 室内机位']]
-        : [['var(--amber)', '待派'], ['var(--violet)', '待命 / 已锁货'], ['var(--blue)', '已派'], ['var(--teal)', '执行中'], ['var(--green)', '已签收'], ['var(--red)', '异常']];
-      document.getElementById('mapLegend').innerHTML =
-        '<div style="font-size:9.5px;letter-spacing:.12em;color:var(--txt-3);text-transform:uppercase;margin-bottom:1px">图例</div>' +
-        items.map(function (i) { return '<div class="li"><i class="sw" style="background:' + i[0] + '"></i>' + i[1] + '</div>'; }).join('') +
-        '<div class="li" style="margin-top:3px;padding-top:5px;border-top:1px solid var(--line-soft)"><i class="sw" style="background:var(--amber);border-radius:50%"></i>库存仓</div>' +
-        '<div class="li"><i class="sw" style="background:var(--violet);border-radius:50%"></i>区域站</div>' +
-        '<div class="li"><i class="sw" style="background:var(--teal);border-radius:50%"></i>港口</div>';
+      const pop = document.getElementById('mvPopover');
+      if (!pop.hidden) pop.innerHTML = renderPopover(s);
+
+      document.querySelectorAll('#mvSeg button').forEach(function (b) {
+        b.classList.toggle('is-on', b.dataset.v === s.ui.mapLevel);
+      });
 
       const lvl = s.ui.mapLevel || 'ALL';
       const orders = s.orders.filter((o) => lvl === 'ALL' || o.level === lvl);
       engine.render({
         state: s, orders: orders, nodes: A.C.NODES, ocean: s.ocean,
-        draft: s.draft, filter: {}, colorBy: s.ui.mapColor || 'status'
+        draft: s.draft, filter: {}, colorBy: s.ui.mapColor || 'status',
+        animateIn: !this._painted
       });
-      if (s.ui.sel && s.ui.sel.id) engine.select('order', s.ui.sel.id);
+      this._painted = true;
+      if (s.ui.mapSel) engine.select('order', s.ui.mapSel);
     },
 
-    onResize: function () { }
+    onResize: function () { home(false); }
   });
 
-  /* ── handlers ────────────────────────────────────────────────────── */
-  function onStageClick(e, t) {
-    const s = view._s, act = t.dataset.act;
-    if (act === 'level') { s.ui.mapLevel = t.dataset.v; A.store.emit(); }
-    else if (act === 'color') { s.ui.mapColor = t.dataset.v; A.store.emit(); }
-    else if (act === 'layer') {
-      const k = t.dataset.v;
-      s.ui.mapLayers = s.ui.mapLayers || {};
-      s.ui.mapLayers[k] = s.ui.mapLayers[k] === false ? true : false;
-      A.store.emit();
-    } else if (act === 'zoom') {
-      if (t.dataset.v === 'fit') engine.fitWindow();
-      else engine.zoom(t.dataset.v === 'in' ? 1.5 : 0.66);
-    } else if (act === 'close-sel') { s.ui.sel = null; A.store.emit(); }
-    else if (act === 'add-stop') { addStop(t.dataset.id); }
-    else if (act === 'remove-stop') { removeStop(t.dataset.id); }
-    else if (act === 'focus') {
-      const o = s.orders.find((x) => x.id === t.dataset.id);
-      if (o) engine.focusOn(o.lng, o.lat, 4.5);
-    } else if (act === 'focus-origin') {
-      const n = A.C.nodeById[s.draft.origin];
-      if (n) engine.focusOn(n.lng, n.lat, 3.4);
-    }
-  }
-
-  function onDockClick(e) {
+  /* ── interactions ────────────────────────────────────────────────── */
+  function onClick(e) {
     const t = e.target.closest('[data-act]');
-    if (!t) return;
+    if (!t) {
+      const pop = document.getElementById('mvPopover');
+      if (!pop.hidden && !e.target.closest('#mvPopover') && !e.target.closest('#mvPopBtn')) pop.hidden = true;
+      return;
+    }
     const s = view._s, act = t.dataset.act, id = t.dataset.id;
-    if (act === 'tab') { s.ui.dockTab = t.dataset.tab; A.store.emit(); }
-    else if (act === 'pick-order' || act === 'add-stop') { addStop(id); }
-    else if (act === 'remove-stop') { removeStop(id); }
-    else if (act === 'clear-plan') {
+    if (act === 'pick') {
+      s.ui.mapSel = id;
+      A.store.emit();
+    } else if (act === 'level') {
+      s.ui.mapLevel = t.dataset.v; A.store.emit();
+    } else if (act === 'add-stop') {
+      addStop(id);
+    } else if (act === 'remove-stop') {
+      e.stopPropagation();
+      removeStop(id);
+    } else if (act === 'focus') {
+      const o = s.orders.find((x) => x.id === id);
+      if (o) engine.focusOn(o.lng, o.lat, Math.max(4.5, engine.getZoom()));
+    } else if (act === 'close-insp') {
+      s.ui.mapSel = null; A.store.emit();
+    } else if (act === 'clear-plan') {
       s.draft.stops = []; s.draft.plan = null; A.store.emit();
-    } else if (act === 'strategy') {
-      s.draft.order = t.dataset.v;
+    } else if (act === 'toggle-strategy') {
+      s.draft.order = s.draft.order === 'window' ? 'nearest' : 'window';
       if (s.draft.stops.length) s.draft.plan = buildPlan(s, s.draft.origin, s.draft.stops, s.draft.order);
       A.store.emit();
     } else if (act === 'gen-plan') {
       genPlan();
-    } else if (act === 'sel-order') {
-      const o = s.orders.find((x) => x.id === id);
-      s.ui.sel = { type: 'order', id };
+    } else if (act === 'open-plan') {
+      s.ui.mapSel = null; A.store.emit();
+    } else if (act === 'toggle-pop') {
+      const pop = document.getElementById('mvPopover');
+      pop.hidden = !pop.hidden;
+      pop.innerHTML = renderPopover(s);
+    } else if (act === 'layer') {
+      s.ui.mapLayers[t.dataset.v] = s.ui.mapLayers[t.dataset.v] === false;
       A.store.emit();
-      if (o) engine.focusOn(o.lng, o.lat, Math.max(4, engine.view.k));
-    } else if (act === 'load-truck') {
-      const tr = (s.trucks || []).find((x) => x.id === id);
-      if (tr) {
-        s.draft.origin = tr.origin; s.draft.stops = tr.stops.slice();
-        s.draft.plan = buildPlan(s, s.draft.origin, s.draft.stops, s.draft.order);
-        A.store.emit();
-        A.toast('已载入派车单 ' + id, 'teal');
-      }
-    } else if (act === 'zoom') {
-      if (t.dataset.v === 'fit') engine.fitWindow();
-      else engine.zoom(t.dataset.v === 'in' ? 1.5 : 0.66);
-    } else if (act === 'focus-origin') {
-      const n = A.C.nodeById[s.draft.origin];
-      if (n) engine.focusOn(n.lng, n.lat, 3.4);
-    }
-  }
-
-  function onDockChange(e) {
-    const s = view._s;
-    if (e.target.dataset.act === 'origin') {
-      s.draft.origin = e.target.value;
-      s.draft.stops = s.draft.stops.filter(function (id) {
-        const o = s.orders.find((x) => x.id === id);
-        return o && o.nodeId === s.draft.origin;
-      });
-      s.draft.plan = s.draft.stops.length ? buildPlan(s, s.draft.origin, s.draft.stops, s.draft.order) : null;
-      const n = A.C.nodeById[s.draft.origin];
-      if (n) engine.focusOn(n.lng, n.lat, 3.2);
-      A.store.emit();
+    } else if (act === 'color') {
+      s.ui.mapColor = t.dataset.v; A.store.emit();
+    } else if (act === 'zoom-in') {
+      engine.zoomIn();
+    } else if (act === 'zoom-out') {
+      engine.zoomOut();
+    } else if (act === 'home') {
+      home(true);
     }
   }
 
@@ -550,9 +573,10 @@
     }
     s.draft.stops.push(id);
     s.draft.plan = buildPlan(s, s.draft.origin, s.draft.stops, s.draft.order);
-    s.ui.dockTab = 'plan';
+    s.ui.mapSel = null;
     A.store.emit();
   }
+
   function removeStop(id) {
     const s = view._s;
     s.draft.stops = s.draft.stops.filter((x) => x !== id);
@@ -566,30 +590,21 @@
     if (plan.violations > 0 && !confirm('计划中有 ' + plan.violations + ' 个站点存在窗口冲突。\n硬窗站点应先拆线或改约；确认要按当前计划生成派车单吗？')) return;
     const id = 'TR-' + String(2400 + (s.trucks || []).length + 1);
     const truck = {
-      id, origin: plan.origin, stops: plan.stops.slice(),
+      id, origin: plan.origin, stops: plan.stops.map((x) => x.id),
       legs: plan.legs.map((l) => ({ to: l.to.id, arrive: hhmm(l.arrive), depart: hhmm(l.depart), miles: l.miles })),
       miles: plan.miles, cost: plan.combined, units: plan.units,
       driver: DRIVERS[(s.trucks || []).length % DRIVERS.length],
       plate: PLATES[(s.trucks || []).length % PLATES.length],
-      depart: s.today + ' 08:00',
-      status: '已排线'
+      depart: s.today + ' 08:00', status: '已排线'
     };
     s.trucks = s.trucks || [];
     s.trucks.push(truck);
-    plan.stops.forEach(function (oid) {
+    plan.stopIds.forEach(function (oid) {
       const o = s.orders.find((x) => x.id === oid);
-      if (o && (o.status === '待派' || o.status === '待命')) { o.status = '已派'; o.path = 'B'; o.agreed = null; o.truckId = id; }
+      if (o && (o.status === '待派' || o.status === '待命')) { o.status = '已派'; o.path = 'B'; o.truckId = id; }
     });
-    s.draft.stops = []; s.draft.plan = null; s.ui.sel = null;
+    s.draft.stops = []; s.draft.plan = null; s.ui.mapSel = null;
     A.store.set({ trucks: s.trucks, orders: s.orders, draft: s.draft });
-    A.toast('已生成派车单 ' + id + ' · ' + truck.stops.length + ' 站 ' + truck.units + ' 台 · ' + fmt.usd(truck.cost), 'teal');
-  }
-
-  function filterOrderList(q) {
-    q = (q || '').trim().toLowerCase();
-    document.querySelectorAll('#mapOrderList > button').forEach(function (b) {
-      const txt = b.textContent.toLowerCase();
-      b.style.display = !q || txt.includes(q) ? '' : 'none';
-    });
+    A.toast('已生成派车单 ' + id + ' · ' + truck.stops.length + ' 站 ' + truck.units + ' 台', 'green');
   }
 })(window);
