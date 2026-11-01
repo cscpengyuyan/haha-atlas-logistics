@@ -1,18 +1,21 @@
-﻿# 地理数据出处
+# 地理数据与底图
 
-## us-states / geo.js 州界
-来源：简化版美国州界 GeoJSON（源自 U.S. Census Bureau 边界文件，公有领域）。
-仅保留本土 49 个面（不含 AK / HI / PR 等），已按 Albers 等积圆锥投影预计算为 SVG path。
+## 底图（在线）
 
-## 道路
-来源：U.S. Census Bureau TIGER/Line 2025 Primary Roads 与 Primary/Secondary Roads。
-https://www2.census.gov/geo/tiger/TIGER2025/PRIMARYROADS/
-已裁剪、简化（Douglas–Peucker，屏幕坐标容差 0.7–1.1 px）并按等级合并为三条 SVG path。
-仅作示意图，不含转向、交通、限行或商用路径规划信息。
+地图使用 [Leaflet 1.9.4](https://leafletjs.com)（BSD-2，见 `../vendor/Leaflet-LICENSE.txt`）加载栅格瓦片：
 
-## 投影
-Albers equal-area conic，标准纬线 29.5° / 45.5°，原点 37.5°，中央经线 96°W，
-球体半径 6,378,137 m。构建脚本见仓库根目录 	ools/build_geo.py（离线运行一次）。
+1. **Esri World Street Map** — `server.arcgisonline.com/.../World_Street_Map`（含路网、地名、地形）
+2. **OpenStreetMap 标准瓦片** — `tile.openstreetmap.org`（Esri 不可用时自动切换）
 
-## 说明
-本仓库不含任何商业瓦片服务、API Key 或第三方运行时依赖。
+版权：**© Esri, HERE, Garmin, © OpenStreetMap contributors**。页面右下角已标注。
+瓦片仅用于底图显示；仓库、订单、路线、航次等业务数据全部来自本仓库内的演示数据，在浏览器端绘制。
+
+## 离线回退
+
+若瓦片不可达，地图自动改用内置的州界轮廓（`us-states.js`）并提示「底图瓦片不可用，已切换到离线示意模式」。
+此时点位、聚合、路线、检视器与派车计算仍然可用。
+
+## us-states.js
+
+简化版美国州界 GeoJSON（49 个本土州面，不含 AK / HI / PR 等，源自 U.S. Census Bureau 边界文件，公有领域），
+仅用于离线回退显示。
